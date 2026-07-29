@@ -27,6 +27,88 @@ const { execFileSync } = require('child_process');
 
 const CACHE = path.join(process.env.HOME || '/tmp', '.cache');
 
+// ── configuration ────────────────────────────────────────────────────────────
+/**
+ * Everything on the bar is toggleable, because "useful" is personal — someone
+ * on API billing has no rate limits to show, someone pairing on a shared
+ * screen does not want their email up there, someone on a laptop has no room
+ * for three meters.
+ *
+ * Three sources, later winning over earlier:
+ *   1. built-in defaults (below)
+ *   2. a JSON file — $STATUSLINE_CONFIG, else ~/.claude/statusline.json
+ *   3. CLI flags in the `command` string — --no-cost, --bar=20, --sep=" · "
+ *
+ * CLI flags win because `settings.json` is the thing you're already editing to
+ * install this; a per-machine tweak shouldn't require a second file.
+ */
+const SEGMENTS = [
+  // key          group       what it shows
+  ['dir', 'identity', 'working directory'],
+  ['repo', 'identity', 'owner/name from the origin remote'],
+  ['branch', 'identity', 'git branch + dirty marker'],
+  ['worktree', 'identity', 'worktree name (--worktree sessions)'],
+  ['pr', 'identity', 'open PR number + review state'],
+  ['model', 'identity', 'model name, ⚡ when fast mode is on'],
+  ['agent', 'identity', 'agent name (--agent sessions)'],
+  ['vim', 'identity', 'vim mode'],
+  ['user', 'identity', 'signed-in Claude account email'],
+  ['cost', 'economics', 'session spend + $/hour'],
+  ['elapsed', 'economics', 'wall-clock + share spent waiting on the API'],
+  ['effort', 'economics', 'reasoning effort level'],
+  ['cache', 'economics', 'share of context input served from cache'],
+  ['diff', 'economics', 'lines added/removed this session'],
+  ['ctx', 'meters', 'context window remaining'],
+  ['session', 'meters', '5-hour plan window'],
+  ['weekly', 'meters', '7-day plan window'],
+];
+
+function loadConfig(argv) {
+  const cfg = {
+    segments: Object.fromEntries(SEGMENTS.map(([k]) => [k, true])),
+    pace: true,          // the ┃ tick on plan meters
+    projection: true,    // "cap in ~22h" replacing the reset countdown
+    labels: true,        // "cost $1.23" vs a bare "$1.23"
+    maxBarWidth: 28,
+    separator: ' | ',
+    singleLine: false,   // never split across lines, drop instead
+    source: 'defaults',
+  };
+
+  const file = process.env.STATUSLINE_CONFIG ||
+    path.join(process.env.HOME || '', '.claude', 'statusline.json');
+  try {
+    const j = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (j && typeof j === 'object') {
+      if (j.segments && typeof j.segments === 'object') Object.assign(cfg.segments, j.segments);
+      for (const k of ['pace', 'projection', 'labels', 'maxBarWidth', 'separator', 'singleLine']) {
+        if (k in j) cfg[k] = j[k];
+      }
+      cfg.source = file;
+    }
+  } catch { /* absent or unparseable — defaults stand rather than blanking the bar */ }
+
+  for (const a of argv) {
+    let m;
+    if ((m = a.match(/^--no-([a-z-]+)$/))) {
+      const k = m[1];
+      if (k in cfg.segments) cfg.segments[k] = false;
+      else if (k === 'pace') cfg.pace = false;
+      else if (k === 'projection') cfg.projection = false;
+      else if (k === 'labels') cfg.labels = false;
+    } else if ((m = a.match(/^--only=(.+)$/))) {
+      const keep = new Set(m[1].split(',').map(x => x.trim()));
+      for (const k of Object.keys(cfg.segments)) cfg.segments[k] = keep.has(k);
+    } else if ((m = a.match(/^--bar=(\d+)$/))) cfg.maxBarWidth = Math.max(3, Math.min(60, +m[1]));
+    else if ((m = a.match(/^--sep=(.*)$/))) cfg.separator = m[1];
+    else if (a === '--single-line') cfg.singleLine = true;
+  }
+  return cfg;
+}
+
+const CFG = loadConfig(process.argv.slice(2));
+const on = k => CFG.segments[k] !== false;
+
 // ── ANSI ─────────────────────────────────────────────────────────────────────
 // BRIGHT palette (90–97) + bold, not the dim 30s. These are the terminal's own
 // bright slots, so they still follow the colour scheme instead of hard-coding
@@ -45,12 +127,17 @@ const white = s => E('97', s);
 /** Printable width — ANSI escapes occupy no columns. */
 const vlen = s => s.replace(/\x1b\[[0-9;]*m/g, '').length;
 
-/** `label value` — the label is always gray so the value stays the loud part. */
-const seg = (label, value) => (value ? gray(label + ' ') + value : '');
+/**
+ * `label value` — the label is gray so the value stays the loud part. Returns
+ * '' when the segment is switched off OR has no value, so callers never need
+ * to check both.
+ */
+const seg = (key, value) =>
+  (!value || !on(key)) ? '' : (CFG.labels ? gray(key + ' ') + value : value);
 
-/** Operator-chosen separator: a literal pipe, padded. */
-const PIPE = gray(' | ');
-const PIPE_W = 3;
+/** Separator. Configurable, but a literal pipe by default. */
+const PIPE = gray(CFG.separator);
+const PIPE_W = CFG.separator.length;
 
 // ── tiny disk cache ──────────────────────────────────────────────────────────
 /**
@@ -142,6 +229,42 @@ function meter(pct, width, tint, markPct) {
   }
   if (run) out += paint(kind, run);
   return out;
+}
+
+// ── --list / --help ──────────────────────────────────────────────────────────
+/**
+ * Printed on demand, never during a render. Exists so the available knobs are
+ * discoverable without reading this file — and so the /statusline-config skill
+ * has one authoritative place to read the segment list from, instead of
+ * carrying its own copy that would drift.
+ */
+if (process.argv.includes('--list') || process.argv.includes('--help')) {
+  const w = Math.max(...SEGMENTS.map(([k]) => k.length));
+  const mark = v => (v ? green('  on') : red(' off'));
+  let last = '';
+  console.log(`\n  ${white('superfluous-statusline')} — segments and switches`);
+  console.log(`  config: ${gray(CFG.source)}\n`);
+  for (const [k, group, desc] of SEGMENTS) {
+    if (group !== last) { console.log(`  ${gray(group)}`); last = group; }
+    console.log(`   ${mark(CFG.segments[k])}  ${white(k.padEnd(w))}  ${gray(desc)}`);
+  }
+  console.log(`\n  ${gray('switches')}`);
+  for (const [k, v, desc] of [
+    ['pace', CFG.pace, 'the ┃ even-burn tick on plan meters'],
+    ['projection', CFG.projection, '"cap in ~22h" replacing the reset countdown'],
+    ['labels', CFG.labels, 'segment labels ("cost $1.23" vs "$1.23")'],
+    ['singleLine', CFG.singleLine, 'never wrap to a second line — drop instead'],
+  ]) console.log(`   ${mark(v)}  ${white(k.padEnd(w))}  ${gray(desc)}`);
+  console.log(`         ${white('maxBarWidth'.padEnd(w))}  ${gray(String(CFG.maxBarWidth))}`);
+  console.log(`         ${white('separator'.padEnd(w))}  ${gray(JSON.stringify(CFG.separator))}`);
+  console.log(`
+  ${gray('Turn things off in')} ~/.claude/statusline.json${gray(':')}
+    ${gray('{ "segments": { "cost": false, "user": false }, "pace": true }')}
+
+  ${gray('...or as flags on the command in settings.json:')}
+    ${gray('--no-cost --no-user --no-pace --bar=20 --sep=" · " --only=dir,branch,ctx')}
+`);
+  process.exit(0);
 }
 
 /** Milliseconds → compact "2h14m" / "14m" / "45s". */
@@ -302,12 +425,12 @@ function render(d, W) {
   // that: it just overflows instead (it did, at 80). So try progressively
   // cheaper variants and take the first that FITS, measured on the rendered
   // string rather than predicted. Degrading content beats degrading legibility.
-  const hasCtx = typeof d.context_window?.remaining_percentage === 'number';
+  const hasCtx = on('ctx') && typeof d.context_window?.remaining_percentage === 'number';
   const H = 3600_000, D = 24 * H;
   const raw = [
-    ['active session', '5h', d.rate_limits?.five_hour, 5 * H],
-    ['weekly', '7d', d.rate_limits?.seven_day, 7 * D],
-  ].filter(([, , v]) => typeof v?.used_percentage === 'number');
+    ['active session', '5h', d.rate_limits?.five_hour, 5 * H, 'session'],
+    ['weekly', '7d', d.rate_limits?.seven_day, 7 * D, 'weekly'],
+  ].filter(([, , v, , key]) => on(key) && typeof v?.used_percentage === 'number');
   const meters = (hasCtx ? 1 : 0) + raw.length;
 
   // Trailing text per window: normally the reset countdown, but when the burn
@@ -315,7 +438,7 @@ function render(d, W) {
   // replaces it — "resets in 2d" is cold comfort if you run out in 14h.
   const tailFor = (v, windowMs, showTail) => {
     if (!showTail) return { text: '', tint: gray };
-    const { capIn } = pace(v, windowMs);
+    const { capIn } = CFG.projection ? pace(v, windowMs) : {};
     if (capIn) return { text: ` cap in ~${capIn}`, tint: yellow };
     const r = v.resets_at ? until(v.resets_at) : '';
     return r ? { text: ` resets in ${r}`, tint: gray } : { text: '', tint: gray };
@@ -329,8 +452,8 @@ function render(d, W) {
       (hasCtx ? 'ctx '.length + PCT_W : 0) +
       raw.reduce((a, w) => a + lbl(w).length + 1 + PCT_W + tailFor(w[2], w[3], showTail).text.length, 0) +
       (meters - 1) * PIPE_W;
-    const bw = Math.min(28, Math.floor((W - fixed - 1) / meters));
-    if (bw < 6) return null;               // this variant cannot fit — try the next
+    const bw = Math.min(CFG.maxBarWidth, Math.floor((W - fixed - 1) / meters));
+    if (bw < Math.min(6, CFG.maxBarWidth)) return null;   // cannot fit — try the next variant
 
     const outSeg = [];
     if (hasCtx) {
@@ -341,7 +464,7 @@ function render(d, W) {
     for (const w of raw) {
       const v = w[2];
       const pct = Math.round(v.used_percentage);
-      const { pacePct } = showPace ? pace(v, w[3]) : {};
+      const { pacePct } = (showPace && CFG.pace) ? pace(v, w[3]) : {};
       // Ahead of pace is the signal, so it escalates the colour a step even
       // when the raw percentage alone would still read as comfortable.
       const behind = typeof pacePct === 'number' && pct > pacePct;
@@ -358,7 +481,7 @@ function render(d, W) {
                          { short: true, showTail: true, showPace: true },
                          { short: true, showTail: false, showPace: true }]) {
     const built = buildMeters(variant);
-    if (built && vlen(built.join(' | ')) <= W - 1) { meterLine = built; break; }
+    if (built && vlen(built.join(CFG.separator)) <= W - 1) { meterLine = built; break; }
     if (built) meterLine = built;           // keep the least-bad as a floor
   }
 
@@ -394,7 +517,11 @@ function render(d, W) {
   for (const g of groups) {
     if (lines.length) {
       const merged = lines[lines.length - 1] + PIPE + g;
+      // In singleLine mode everything must share one row, so a group that
+      // doesn't fit is DROPPED rather than wrapped — the caller asked for one
+      // line, and silently growing to three would be ignoring them.
       if (vlen(merged) <= W - 1) { lines[lines.length - 1] = merged; continue; }
+      if (CFG.singleLine) continue;
     }
     lines.push(g);
   }

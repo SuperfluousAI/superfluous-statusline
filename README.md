@@ -33,6 +33,8 @@ under-using      weekly ███▎░░░░░░░░░░░░░░�
 - **Session economics.** Spend rate per hour, elapsed wall-clock and what share of it was actually spent
   waiting on the API, reasoning effort, and cache-hit ratio.
 - **Every segment is labelled.** `cost $14.42`, not a bare `$14.42` you have to decode by position.
+- **All of it is optional.** Every segment and switch toggles from a config file, CLI flags, or the
+  bundled `/statusline-config` skill.
 - **It fits your terminal.** Sizes itself from `COLUMNS`. Three groups — identity, economics, meters —
   packed into as few lines as fit, with the least important segments dropped before it would ever wrap.
   Verified from 60 to 250 columns.
@@ -104,24 +106,134 @@ echo 'not json' | node statusline.js; echo "exit=$?"   # exit=0
 After it has rendered once, `~/.cache/statusline-last.json` holds your real payload — the most useful
 fixture for testing changes.
 
-## Customising
+## What each part means
 
-It's one readable file; edit it directly.
+**Identity — where you are**
 
-| Want to | Do this |
+| Segment | Shows |
 |---|---|
-| Remove a segment | Delete its line from `l1items` (identity) or `ecoItems` (economics) in `render()` |
-| Turn off pace ticks | Pass `showPace: false` in the `buildMeters` variants |
-| Reorder segments | Edit the `ORDER` array |
-| Change what's dropped first when space is tight | Change the priority numbers in `l1items` (higher = kept longer) |
-| Change bar characters | `meter()` — `█` filled, `░` track, `EIGHTHS` for the leading edge |
-| Change colour thresholds | The `tint` ternaries in `render()` and `contextSeg` |
-| Make bars wider/narrower | The `Math.min(28, …)` cap in `buildMeters()` |
-| Hide the email | Delete the `userSeg()` line from `l1items` |
+| `dir` | working directory, `~`-relative; basename only on a narrow terminal |
+| `repo` | `owner/name`, parsed by Claude Code from your `origin` remote |
+| `branch` | git branch, with a red `*` when tracked files are dirty |
+| `worktree` | worktree name — only during `--worktree` sessions |
+| `pr` | open PR number + review state, tinted (approved green, changes-requested red, draft gray) |
+| `model` | model name; `1M` tag for extended context, `⚡` when fast mode is on |
+| `agent` | agent name — only under `--agent` |
+| `vim` | current vim mode — only when vim mode is enabled |
+| `user` | your signed-in Claude account |
 
-Fields available but not shown by default — `session_name`, `output_style`, `exceeds_200k_tokens`,
-`workspace.added_dirs`, `transcript_path` — are catalogued in
-[`docs/how-it-works.md` §6](docs/how-it-works.md).
+**Economics — what it's costing**
+
+| Segment | Shows |
+|---|---|
+| `cost` | session spend and `$/h`. The rate is hidden for the first 5 minutes, where one expensive call over 40 seconds reads as $400/h |
+| `elapsed` | wall-clock, plus what share was actually spent *waiting on the API* (hidden below 10% — the rest of the time is you reading) |
+| `effort` | reasoning effort. Live, so it reflects a mid-session `/effort` |
+| `cache` | share of context input tokens served from cache. Green ≥80%. A sudden drop means your prefix was invalidated and you're paying full freight again |
+| `diff` | lines added/removed this session |
+
+**Meters — headroom**
+
+| Meter | Shows |
+|---|---|
+| `ctx` | context window **remaining**. Green >25%, yellow ≤25%, red ≤10% |
+| `active session` | your 5-hour plan window |
+| `weekly` | your 7-day plan window |
+
+Meters use full blocks `█` with eighth-block leading edges (`▏▎▍▌▋▊▉`) so they advance smoothly instead of
+jumping a cell at a time. The filled part carries the colour; the track stays gray so the boundary is
+unmistakable.
+
+## How the pace tick works
+
+`resets_at` tells you when a window resets, and the window length is fixed (5 hours, 7 days) — so **elapsed
+time is derivable**, and with it two things a bare percentage cannot tell you.
+
+**Where you should be.** If you burned the window evenly, the fill would sit at `elapsed ÷ window`. That
+position is drawn as `┃`:
+
+```
+weekly ███████████▎┃░░░░░░░░░░░░░░░ 41%   ← on pace: fill sits at the tick
+weekly ████████┃██████████░░░░░░░░░ 68%   ← past the tick: burning faster than it replenishes
+weekly ███▎░░░░░░░░░░░░░░░░┃░░░░░░░ 12%   ← behind the tick: plenty spare
+```
+
+**68% is fine on day six and alarming on day two.** The tick is what distinguishes them — and being past it
+escalates the meter's colour one step even when the raw number still looks comfortable.
+
+**When you'd actually run out.** From used-percent and elapsed time you get a burn rate, and from that the
+moment it would reach 100%. If that lands *before* the reset, it replaces the countdown:
+
+```
+weekly ████████┃██████████░░░░░░░░░ 68%  cap in ~22h35m     (instead of "resets in 2d")
+```
+
+Because "resets in 2d" is cold comfort if you run out in 22 hours. If the projection lands after the reset
+there's nothing to warn about, so the countdown stays.
+
+Guards: nothing is shown in the first minute of a window (the rate is pure noise), or when `resets_at` is
+missing or already past, or when the time remaining exceeds the window length.
+
+## Configuring it
+
+Everything is toggleable — "useful" is personal. Someone on API billing has no plan windows to show;
+someone screen-sharing doesn't want their email up there.
+
+**See what's on:**
+
+```bash
+node statusline.js --list
+```
+
+That prints every segment and switch with its current value and which config file is in effect. It's the
+authoritative list — start there. Every field it can draw from, including the ones off by default, is
+catalogued in [`docs/how-it-works.md` §6](docs/how-it-works.md).
+
+**Option A — a config file** at `~/.claude/statusline.json` (or wherever `$STATUSLINE_CONFIG` points):
+
+```json
+{
+  "segments": { "cost": false, "user": false, "cache": false },
+  "pace": true,
+  "projection": true,
+  "labels": true,
+  "maxBarWidth": 28,
+  "separator": " | ",
+  "singleLine": false
+}
+```
+
+**Option B — flags on the command** in `settings.json`. These win over the file:
+
+```
+--no-cost  --no-user  --no-pace  --no-projection  --no-labels
+--only=dir,branch,ctx   --bar=20   --sep=" · "   --single-line
+```
+
+**Segment keys:** `dir repo branch worktree pr model agent vim user` · `cost elapsed effort cache diff` ·
+`ctx session weekly`
+
+**Or just ask Claude.** Copy the bundled skill in and it'll do it conversationally:
+
+```bash
+mkdir -p ~/.claude/skills && cp -r skill/statusline-config ~/.claude/skills/
+```
+
+Then `/statusline-config hide my email and the cost` — it reads the live config, edits the file, and shows
+you the bar rendered before and after.
+
+### Config gotchas
+
+- **A broken config file is ignored, not fatal.** Defaults stand rather than the bar vanishing — the
+  failure mode here is always "show less", never "show nothing". So if a setting seems not to apply, check
+  the JSON parses: `python3 -m json.tool ~/.claude/statusline.json`.
+- **Flags beat the file.** A file setting that appears to do nothing usually has a contradicting flag on
+  the `command` string.
+- **`singleLine` drops, it doesn't shrink.** Groups keep their order and any that won't fit the row is
+  dropped whole — on a narrow terminal that can cost you the meters. Pair it with `--only=`.
+- **Turning everything off blanks the bar.** Legitimate, but it looks exactly like a crash.
+- Meters keep their labels even with `labels: false` — three unlabelled bars are unreadable.
+- Changes apply on the next render. No restart.
 
 ## Troubleshooting
 
@@ -150,12 +262,13 @@ coverage, or swap the characters in `meter()` for `#` and `-`.
 ## Files
 
 ```
-statusline.js          the whole thing — one file, no dependencies
-docs/how-it-works.md   the status line feature documented in depth (official contract + this build),
-                       including the full stdin field reference and the mistakes made getting here
+statusline.js               the whole thing — one file, no dependencies
+skill/statusline-config/    optional Claude Code skill: configure the bar by asking
+docs/how-it-works.md        the status line feature documented in depth (official contract + this
+                            build), the full stdin field reference, and the mistakes made getting here
 ```
 
-`docs/how-it-works.md` is worth reading even if you write your own — §1–6 document the feature itself:
+[`docs/how-it-works.md`](docs/how-it-works.md) is worth reading even if you write your own — §1–6 document the feature itself:
 every settings key, when it re-runs, what the failure modes are, the complete JSON payload with
 absent/null semantics, and why `tput cols` doesn't work inside a status line.
 
