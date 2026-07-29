@@ -163,17 +163,29 @@ const PIPE_W = CFG.separator.length;
  * in ~/.cache, written atomically for the same reason the payload cache is
  * (a render can be reading while another writes).
  */
-function cached(name, ttlMs, produce) {
+function cached(name, ttlMs, produce, stamp) {
   const f = path.join(CACHE, `statusline-${name}`);
+  // `stamp` is a cheap fingerprint of the SOURCE. When it's supplied the cache
+  // is only reused while the fingerprint matches, so a change to the underlying
+  // data invalidates instantly instead of waiting out a TTL. A time-based TTL
+  // alone is a bet that the data won't change sooner — and for the signed-in
+  // account that bet was simply wrong: /login rewrites the file and the bar kept
+  // showing the previous account for hours.
+  const want = stamp === undefined ? null : String(stamp);
   try {
     const st = fs.statSync(f);
-    if (Date.now() - st.mtimeMs < ttlMs) return fs.readFileSync(f, 'utf8');
+    if (Date.now() - st.mtimeMs < ttlMs) {
+      const raw = fs.readFileSync(f, 'utf8');
+      if (want === null) return raw;
+      const i = raw.indexOf('\n');
+      if (i > -1 && raw.slice(0, i) === want) return raw.slice(i + 1);
+    }
   } catch { /* cold cache */ }
   let v = '';
   try { v = produce() ?? ''; } catch { return ''; }
   try {
     const tmp = `${f}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, v);
+    fs.writeFileSync(tmp, want === null ? v : `${want}\n${v}`);
     fs.renameSync(tmp, f);
   } catch { /* cache is an optimisation, never a requirement */ }
   return v;
@@ -563,6 +575,16 @@ function doctor() {
     ok(`payload cache ${age < 120 ? 'fresh' : 'stale'} (${dur(age * 1000) || '0s'} old), Claude Code ${d.version || '?'}`);
     if (!d.rate_limits) hm('no rate_limits in the last payload — plan meters need a Claude.ai Pro/Max account');
   } catch { hm('no payload cached yet — the status line has not rendered since install'); }
+
+  // Signed-in account. Worth surfacing because it is the one value not taken
+  // from the payload, so it is the one that can disagree with reality.
+  try {
+    const src = path.join(HOME, '.claude.json');
+    const m = fs.readFileSync(src, 'utf8').match(/"emailAddress"\s*:\s*"([^"]+)"/);
+    const age = dur(Date.now() - fs.statSync(src).mtimeMs) || '0s';
+    if (m) ok(`account ${m[1]} ${gray(`(from .claude.json, changed ${age} ago)`)}`);
+    else hm('no account found in ~/.claude.json — the user segment will be empty');
+  } catch { hm('cannot read ~/.claude.json — the user segment will be empty'); }
 
   // Config
   const cf = process.env.STATUSLINE_CONFIG || path.join(HOME, '.claude', 'statusline.json');
@@ -1107,12 +1129,18 @@ function diffSeg(d) {
  * account changes about as often as the machine is re-provisioned.
  */
 function userSeg() {
-  const email = cached('identity', 6 * 3600 * 1000, () => {
-    const raw = fs.readFileSync(path.join(HOME, '.claude.json'), 'utf8');
+  // Invalidate on the mtime of the file the value comes from. `/login` rewrites
+  // ~/.claude.json, so this updates on the very next render — one stat() per
+  // render instead of re-reading 130 KB, and no staleness window at all.
+  const src = path.join(HOME, '.claude.json');
+  let stamp = '0';
+  try { stamp = String(fs.statSync(src).mtimeMs); } catch { /* no file; produce() will fail too */ }
+  const email = cached('identity', 24 * 3600 * 1000, () => {
+    const raw = fs.readFileSync(src, 'utf8');
     // Targeted match rather than JSON.parse: on a cache miss this still only
     // scans, and never materialises a 130 KB object graph.
     const m = raw.match(/"emailAddress"\s*:\s*"([^"]+)"/);
     return m ? m[1] : '';
-  });
+  }, stamp);
   return email ? seg('user', white(email)) : '';
 }

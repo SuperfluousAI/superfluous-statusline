@@ -1,13 +1,12 @@
 # How the Claude Code status line works
 
-> **Two things in one document.** Sections 1–6 are a **reference for the status line feature itself** —
-> useful whether or not you use this script. The rest is **how this implementation works** and why.
+> Sections 1–6 are a **reference for the status line feature itself** — useful whether or not you use this
+> script. The rest is **how this implementation works** and why.
 >
-> **Provenance is marked throughout**: **📘 OFFICIAL** — Anthropic's docs, cited · **🔬 OBSERVED** —
-> measured on a real machine · **⚙️ OURS** — a decision this project made.
+> **📘 OFFICIAL** — Anthropic's docs, cited · **🔬 OBSERVED** — measured on a real machine · **⚙️ OURS** — a
+> decision this project made.
 >
-> Primary source: **<https://code.claude.com/docs/en/statusline>** (read 2026-07-28; note
-> `docs.claude.com/en/docs/claude-code/statusline` 301s to it). Observed against Claude Code **2.1.220**
+> Primary source: **<https://code.claude.com/docs/en/statusline>**. Observed against Claude Code **2.1.220**
 > on Linux.
 
 ---
@@ -318,9 +317,10 @@ right-hand third of the line to a hard cut is not. Before anything is dropped, t
 its local part** (`you`) — that still answers "which account is this?", which is why it's there.
 
 > ⚙️ **The email is not in the payload.** No field carries the signed-in account, so it is read from
-> `~/.claude.json` (`oauthAccount.emailAddress`) — cached 6h, regex-matched rather than `JSON.parse`d,
-> because that file is ~130 KB and this runs on every render. Note this is the **Claude account**, which
-> is not the same as `git config user.email` (`you@git.example.com` here).
+> `~/.claude.json` (`oauthAccount.emailAddress`) — regex-matched rather than `JSON.parse`d, because that
+> file is ~130 KB and this runs on every render. The cache is keyed on that file's **mtime**, not a clock,
+> so `/login` is reflected on the next render. Note this is the **Claude account**, which
+> is not the same as `git config user.email` (`you@example.com` here).
 
 ### Meters
 
@@ -330,7 +330,7 @@ colour, track stays gray — the boundary is the point of a bar over a number.
 
 | Meter | Label | Source | Thresholds |
 |---|---|---|---|
-| context | `ctx` | `context_window.remaining_percentage` (**left**, not used) | green >25% · yellow ≤25% · red ≤10% |
+| context | `ctx` | `context_window.used_percentage` (**used**, not left) | green <50% · cyan ≥50% · yellow ≥75% · red ≥90% |
 | 5-hour | `active session` | `rate_limits.five_hour` | green <50% · cyan ≥50% · yellow ≥75% · red ≥90% |
 | 7-day | `weekly` | `rate_limits.seven_day` | same |
 
@@ -614,8 +614,9 @@ All five gaps this document previously listed are now closed:
 Remaining known trade-offs, stated rather than hidden:
 
 - The **dirty marker can be up to 4s stale**. Deliberate: it buys back a `git status` per render.
-- The **email is cached 6h**, so switching accounts won't show for up to 6h (`rm ~/.cache/statusline-identity`
-  to force it).
+- The **account email is cached against the mtime of `~/.claude.json`**, so `/login` shows on the very next
+  render. It was a 6h time-based TTL, which meant switching accounts left the wrong email on the bar for
+  hours — filed as an accepted "gotcha" when it was simply a bug.
 - `refreshInterval: 30` means the script runs on a timer forever, even when idle. That is the price of a
   live countdown; the work per run is ~66 ms and mostly cached.
 
@@ -634,25 +635,61 @@ Remaining known trade-offs, stated rather than hidden:
 
 ---
 
-## 12. History — and the mistakes worth keeping
+## 12. History
 
-Recorded because each is a trap the next person can fall into.
+- **2026-07-28** — replaced GSD's `~/.claude/hooks/gsd-statusline.js` (operator: the GSD author
+  rug-pulled). Previous settings backed up to `~/.claude/settings.json.bak-pre-statusline-2026-07-28`;
+  GSD's script left on disk, unreferenced, **and its hooks still wired** — see the project docs.
+- **2026-07-28** — built against 4 guessed fields, then rebuilt against the full payload once a live render
+  was captured, adding the rate-limit meters. The gap between assumed and actual is why the payload cache
+  exists.
+- **2026-07-28** — brighter palette; both windows always on with reset countdowns; `ctx` → `ctx left`.
+  Fixed a non-atomic cache write that handed a test a truncated file.
+- **2026-07-28** — two-line layout with real meters; runtime width detection. **Its stated root cause
+  ("terminal is 80 columns") was wrong** — see §5.
+- **2026-07-28** — `↻` spelled out as `resets in`; the 80-column misdiagnosis corrected; renders began
+  recording their own width.
+- **2026-07-28** — `5h` → `active session`, `7d` → `weekly`. Exposed a real bug: the width budget assumed a
+  3-column label and the minimum-bar-width clamp turned "doesn't fit" into "overflows". Fixed by summing
+  the budget from real strings + the fallback ladder.
+- **2026-07-28** — **read the official docs** and reconciled this entire document against them. Switched
+  width detection to `COLUMNS` (the documented mechanism) from `tput` (which worked by accident). Recorded
+  the full field reference, the update triggers, the failure modes, and §10's gaps.
+- **2026-07-28 (operator)** — labels on every segment, `|` separators, the signed-in account email, and
+  **all five §10 gaps closed**. Adding six more segments made line 1 exceed the terminal for the first
+  time (250+ columns with everything present), so line 1 gained priority-based dropping with the email
+  shortening to its local part first. Git cost removed by reading `.git/HEAD` directly and caching the
+  dirty check.
+- **2026-07-28 (operator)** — **pace markers + burn projection** on the rate-limit meters, and an
+  **economics group** (cost with $/h, elapsed with API share, effort, cache-hit ratio). Layout generalised
+  from two fixed lines to three groups packed greedily into as many lines as needed. Verified 60–250
+  columns across three payloads.
+- **2026-07-28 (operator)** — **everything is now configurable** (`~/.claude/statusline.json` + CLI flags +
+  `--list`), and a **`/statusline-config` skill** drives it. The skill deliberately reads `--list` instead
+  of carrying its own segment list, so the two cannot drift — the same failure that made three hub skills
+  unregistered for a year.
+- **2026-07-28 (operator)** — **Windows support**: `os.homedir()`/`os.tmpdir()` instead of `$HOME`/`/tmp`
+  (the old code *threw* on Windows), separator-agnostic path splitting, case-insensitive home matching,
+  `tput` skipped on win32, and the cache directory created at startup — it never existed on Windows or a
+  fresh macOS, so caching had been silently dead there. Verified by simulating each condition on Linux;
+  the genuinely unverifiable parts (fonts, colours, `COLUMNS` on Windows, `git.exe` resolution) are listed
+  as unverified rather than claimed.
+- **2026-07-29** — three new modes: **`install`/`uninstall`** (merges, timestamped backup, refuses to
+  clobber unparseable JSON, renders a preview, wires both bars), **`--doctor`** (diagnoses the silent
+  failure modes), and **`--subagent`** (the `subagentStatusLine` surface — one row per agent with its own
+  context meter). Fixed a real trailing-whitespace bug found on the way: `tidy()` only stripped spaces
+  before a *single* ANSI reset, and an empty tail produced two — the fix was to stop emitting escapes for
+  empty content at all.
+- **2026-07-29** — **the context meter now shows USED, not remaining.** It was the only meter on the bar
+  that emptied as you consumed the thing it measured, so an identical-looking bar meant opposite things
+  depending on which one you were reading. All three now fill up as you spend, and share one colour scale
+  (green <50 · cyan ≥50 · yellow ≥75 · red ≥90). Falls back to `100 - remaining_percentage` if the harness
+  ever sends only the latter.
+- **2026-07-29** — **`/login` no longer leaves a stale account on the bar.** The email was cached on a 6-hour
+  time-based TTL, so switching accounts showed the previous one for hours; worse, that had been written down
+  as a known gotcha rather than fixed. The cache is now keyed on the **mtime of the file the value comes
+  from**, which `/login` rewrites — correct on the next render, and still one `stat()` instead of re-reading
+  130 KB. `cached()` gained a general `stamp` parameter for this: a TTL alone is a bet that the data won't
+  change sooner, and that bet was wrong. `--doctor` now prints the resolved account and when it last
+  changed.
 
-- **Built against 4 guessed fields**, then rebuilt against the full payload once a live render was
-  captured. **This is why the script caches every payload** — the contract stays verified from fact.
-- **The payload cache was written non-atomically**, and a live render truncated it mid-read.
-- **"The terminal is 80 columns" — wrong.** `tput cols` in a *different shell* measures that shell's pty.
-  The real terminal was 214. Where you measure is part of the measurement.
-- **`tput cols` inside the script appeared to work.** Luck: ncurses reads `$COLUMNS` itself — the variable
-  the docs tell you to read directly. **"It works" is not "it's correct."**
-- **A minimum bar width made things worse** — clamping to ≥6 cells overflowed instead of rescuing.
-  Degrade *content*, never legibility.
-- **Renaming a label broke the layout**, because the width budget had the old label's length baked in.
-- **`awk`/`wc -c` count bytes, and `█` is three of them.** Byte-counting called a 76-column line 158, then
-  called a real overflow fine.
-- **`~/.cache` was assumed to exist** — true on Linux, false on Windows and fresh macOS. Every cache write
-  failed silently and a 130 KB file was re-read on every render, with the bar still looking correct.
-- **Trailing whitespace survived** because the trimmer expected one ANSI reset and empty content emitted
-  two. Fixed by not emitting escapes for empty content at all.
-- **"git not found on PATH" was the wrong diagnosis** — git was a wrapper script under `$HOME` that failed
-  only when `HOME` was unusual. Distinguish "absent" from "present but broken."
