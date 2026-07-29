@@ -317,9 +317,10 @@ right-hand third of the line to a hard cut is not. Before anything is dropped, t
 its local part** (`you`) — that still answers "which account is this?", which is why it's there.
 
 > ⚙️ **The email is not in the payload.** No field carries the signed-in account, so it is read from
-> `~/.claude.json` (`oauthAccount.emailAddress`) — regex-matched rather than `JSON.parse`d, because that
-> file is ~130 KB and this runs on every render. The cache is keyed on that file's **mtime**, not a clock,
-> so `/login` is reflected on the next render. Note this is the **Claude account**, which
+> `~/.claude.json` (`oauthAccount.emailAddress`) — **fresh on every render, uncached**, so switching accounts
+> shows immediately. `JSON.parse` first (addresses the field by name, so it can't pick up some other
+> `emailAddress`), regex as the fallback for the case that actually happens: `/login` is mid-rewrite and we
+> catch a partial file. Reading fresh means that self-heals next render; a cache would latch the bad value. Note this is the **Claude account**, which
 > is not the same as `git config user.email` (`you@example.com` here).
 
 ### Meters
@@ -614,9 +615,10 @@ All five gaps this document previously listed are now closed:
 Remaining known trade-offs, stated rather than hidden:
 
 - The **dirty marker can be up to 4s stale**. Deliberate: it buys back a `git status` per render.
-- The **account email is cached against the mtime of `~/.claude.json`**, so `/login` shows on the very next
-  render. It was a 6h time-based TTL, which meant switching accounts left the wrong email on the bar for
-  hours — filed as an accepted "gotcha" when it was simply a bug.
+- The **account email is not cached at all** — read fresh every render, so `/login` is reflected
+  immediately. It was cached twice (a 6h TTL, then an mtime-keyed cache) before the cost was measured:
+  **0.6 ms** to read and scan the 129 KB file, against a ~40 ms render. The cache was defending 1.5% of a
+  render and risking a stale identity.
 - `refreshInterval: 30` means the script runs on a timer forever, even when idle. That is the price of a
   live countdown; the work per run is ~66 ms and mostly cached.
 
@@ -692,4 +694,11 @@ Remaining known trade-offs, stated rather than hidden:
   130 KB. `cached()` gained a general `stamp` parameter for this: a TTL alone is a bet that the data won't
   change sooner, and that bet was wrong. `--doctor` now prints the resolved account and when it last
   changed.
+- **2026-07-29** — **the account is now read fresh every render, uncached.** Operator switches between
+  several accounts, and this is the one value that must never lag. Both previous designs (6h TTL, then
+  mtime-keyed) were defending a cost I had never measured: **0.6 ms** to read and scan 129 KB, versus a
+  ~40 ms render dominated by node startup. The lesson is the shape of the mistake — I optimised on an
+  assumption, and paid for it with a class of bug. `JSON.parse` addresses the field by name with the regex
+  as a fallback for a partial read during `/login`; reading fresh means a transient failure self-heals,
+  which no cache could do.
 

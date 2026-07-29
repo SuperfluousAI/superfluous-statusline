@@ -1123,24 +1123,29 @@ function diffSeg(d) {
  * Signed-in Claude account.
  *
  * NOT in the stdin payload — it lives in ~/.claude.json under
- * `oauthAccount.emailAddress`. That file is ~130 KB, so parsing it on every
- * render would be exactly the kind of per-render cost the docs warn about;
- * it goes through the TTL cache with a long expiry, since the signed-in
- * account changes about as often as the machine is re-provisioned.
+ * `oauthAccount.emailAddress`.
+ *
+ * READ FRESH ON EVERY RENDER, deliberately not cached. It was cached, twice:
+ * first on a 6-hour TTL (which left the wrong account on the bar after
+ * `/login`), then keyed on the file's mtime. Both were defending against a cost
+ * I had never measured. Measured: 0.6 ms to read and scan the 129 KB file,
+ * against a ~30-40 ms render dominated by node startup — about 1.5%. The cache
+ * was buying nothing and risking a stale identity, which for someone switching
+ * between accounts is the one value that must never lag.
+ *
+ * JSON.parse first, regex second. Parsing addresses the field by name, so it
+ * cannot pick up some other `emailAddress` a future file might contain; the
+ * regex is the fallback for the case that actually happens — `/login` is
+ * mid-rewrite and we catch a partial file. Reading fresh means a transient
+ * failure self-heals on the next render, which a cache could not do: it would
+ * latch the bad value.
  */
 function userSeg() {
-  // Invalidate on the mtime of the file the value comes from. `/login` rewrites
-  // ~/.claude.json, so this updates on the very next render — one stat() per
-  // render instead of re-reading 130 KB, and no staleness window at all.
   const src = path.join(HOME, '.claude.json');
-  let stamp = '0';
-  try { stamp = String(fs.statSync(src).mtimeMs); } catch { /* no file; produce() will fail too */ }
-  const email = cached('identity', 24 * 3600 * 1000, () => {
-    const raw = fs.readFileSync(src, 'utf8');
-    // Targeted match rather than JSON.parse: on a cache miss this still only
-    // scans, and never materialises a 130 KB object graph.
-    const m = raw.match(/"emailAddress"\s*:\s*"([^"]+)"/);
-    return m ? m[1] : '';
-  }, stamp);
+  let raw;
+  try { raw = fs.readFileSync(src, 'utf8'); } catch { return ''; }
+  let email = '';
+  try { email = JSON.parse(raw)?.oauthAccount?.emailAddress || ''; }
+  catch { email = (raw.match(/"emailAddress"\s*:\s*"([^"]+)"/) || [])[1] || ''; }
   return email ? seg('user', white(email)) : '';
 }
