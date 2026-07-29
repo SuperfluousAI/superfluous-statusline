@@ -1,17 +1,14 @@
 # How the Claude Code status line works
 
 > **Two things in one document.** Sections 1–6 are a **reference for the status line feature itself** —
-> useful whether or not you use this script. Sections 7–11 are **how this particular implementation
-> works** and why it makes the choices it does.
+> useful whether or not you use this script. The rest is **how this implementation works** and why.
 >
-> **Provenance is marked throughout**, because it turned out to matter:
-> **📘 OFFICIAL** — from Anthropic's docs, cited · **🔬 OBSERVED** — measured on a real machine ·
-> **⚙️ OURS** — a decision this project made.
+> **Provenance is marked throughout**: **📘 OFFICIAL** — Anthropic's docs, cited · **🔬 OBSERVED** —
+> measured on a real machine · **⚙️ OURS** — a decision this project made.
 >
 > Primary source: **<https://code.claude.com/docs/en/statusline>** (read 2026-07-28; note
 > `docs.claude.com/en/docs/claude-code/statusline` 301s to it). Observations were made against Claude
-> Code **2.1.220**. Local evidence lives in `~/.cache/statusline-last.json` (last raw payload) and
-> `~/.cache/statusline-width` (last measured width).
+> Code **2.1.220** on Linux.
 
 ---
 
@@ -60,8 +57,7 @@ Related keys elsewhere in settings:
   use this instead of writing a script.
 
 ⚙️ Point it at an **absolute path** to wherever you cloned this repo, so the file you edit is the file
-that runs — no copy step, nothing to keep in sync. The cost of that choice: move or delete the clone and
-the status line silently stops rendering, because the harness runs a command that no longer exists.
+that runs. The cost: move or delete the clone and the status line silently stops rendering.
 
 ---
 
@@ -269,7 +265,7 @@ the script survive a Claude Code update that renames something.
 ## 8. Our layout
 
 ```
-dir code/my-project | branch main* | model Opus 5 1M | user you@example.com
+dir code/my-project | branch main* | model Opus 5 1M | cost $14.42 | diff +1139/-40 | user you@example.com
 ctx █████████████████████▎░░░░░░ 76%  | active session ███████░░░░░░░░░░░░░░░░░░░░░ 25%  resets in 12m | weekly ██████████████████▍░░░░░░░░░ 66%  resets in 14h
 ```
 
@@ -324,8 +320,8 @@ its local part** (`you`) — that still answers "which account is this?", which 
 > ⚙️ **The email is not in the payload.** No field carries the signed-in account, so it is read from
 > `~/.claude.json` (`oauthAccount.emailAddress`) — cached 6h, regex-matched rather than `JSON.parse`d,
 > because that file is ~130 KB and this runs on every render. Note this is the **Claude account**, which
-> is not the same as `git config user.email` — they are often different accounts, and the one worth
-> showing is the one whose rate limits the bar is displaying.
+> is not the same as `git config user.email` — often different accounts, and the one worth showing is
+> the one whose rate limits the bar displays.
 
 ### Meters
 
@@ -389,26 +385,121 @@ optional field.
 
 ---
 
+## 8b. Configuration
+
+⚙️ Everything on the bar is toggleable, because "useful" is personal — someone on API billing has no rate
+limits to show, someone screen-sharing doesn't want their email up there, someone on a laptop has no room
+for three meters.
+
+**Three sources, later winning over earlier:**
+
+1. built-in defaults (everything on)
+2. a JSON file — `$STATUSLINE_CONFIG`, else `~/.claude/statusline.json`
+3. CLI flags on the `command` string in `settings.json`
+
+Flags win because `settings.json` is the file you're already editing to install this; a per-machine tweak
+shouldn't require a second one.
+
+```json
+{
+  "segments": { "cost": false, "user": false },
+  "pace": true, "projection": true, "labels": true,
+  "maxBarWidth": 28, "separator": " | ", "singleLine": false
+}
+```
+
+```
+--no-cost  --no-user  --no-pace  --no-projection  --no-labels
+--only=dir,branch,ctx   --bar=20   --sep=" · "   --single-line
+```
+
+**Segment keys** — `dir repo branch worktree pr model agent vim user` (identity) ·
+`cost elapsed effort cache diff` (economics) · `ctx session weekly` (meters).
+
+**`node statusline.js --list`** prints every segment and switch with its current value and the config
+source. It is the authoritative list: the `statusline-config` skill reads it rather than carrying its own
+copy, so the two can't drift.
+
+Behaviour worth knowing:
+
+- **A broken config file is ignored, not fatal.** Defaults stand rather than the bar blanking — the failure
+  mode for this script is always "show less", never "show nothing".
+- **`singleLine` drops, it does not shrink.** Groups stay in order and any that won't fit the row is
+  dropped whole. On a narrow terminal that can cost you the meters, so pair it with `--only=`.
+- **Turning everything off blanks the bar** — legitimate, but it looks identical to a crash.
+- Meters keep their labels even under `labels: false`; three unlabelled bars are unreadable.
+
+---
+
+## 8c. Platforms
+
+⚙️ The script is written to run on Linux, macOS and Windows. What that took, and what is actually proven,
+are two different things — both are recorded here.
+
+### What Windows breaks, and the fix
+
+| Assumption | Why it fails on Windows | Fix |
+|---|---|---|
+| `process.env.HOME` | Windows uses `USERPROFILE`; `$HOME` is undefined, and `path.join(undefined, …)` **throws** | `os.homedir()` |
+| `'/tmp'` fallback | not a path on Windows | `os.tmpdir()` |
+| `cwd.split('/')` | Windows paths are `\`-separated, so `C:\Users\me\code` is **one** component and the directory never shortens | split on `/[\\/]+/`, always render with `/` |
+| `cwd.startsWith(home)` | NTFS is case-insensitive, so `C:\Users\Me` vs `C:\users\me` misses | case-insensitive compare on Windows only |
+| `tput cols` fallback | no `tput`; spawns a doomed process on every render | skipped entirely when `process.platform === 'win32'` |
+| `~/.cache` exists | true by convention on Linux, **not** on Windows or a fresh macOS — every cache write failed silently, so the 130 KB identity file was re-read on every render | `mkdirSync(recursive)` at startup |
+
+📘 One more, from the docs: **on Windows with Git Bash installed, backslashes in the `command` path are
+consumed as escape characters before the script runs.** Use **forward slashes** in `settings.json` even on
+Windows.
+
+### What is actually verified
+
+**Verified — by simulating Windows conditions on Linux:**
+
+- Windows-shaped paths render correctly: `C:\Users\you\code\my-project` → `code/my-project`,
+  drive roots, and UNC paths (`\\server\share\proj`)
+- `HOME` unset entirely — resolves and renders
+- cache directory created when absent
+- `git` binary missing from `PATH` — branch still renders (it comes from `.git/HEAD`), only the dirty
+  marker disappears
+- not a git repo — branch segment omits itself
+- read-only home — cache writes fail silently, bar renders
+- the full 60–250 column sweep still clean after the platform changes
+
+**NOT verified — no Windows or macOS machine was available:**
+
+- that ANSI bright colours render in the target terminal
+- that the font has the block glyphs (`█ ░ ▏▎▍▌▋▊▉ ┃`)
+- that Claude Code exports `COLUMNS` on Windows (if not, the bar falls back to 80 columns — it degrades,
+  it doesn't break)
+- that `git.exe` resolves through `execFileSync('git', …)` (CreateProcess should append `.exe`, untested)
+- `rename()` behaviour under Windows file locking — the atomic cache write may occasionally fail there,
+  which is caught and non-fatal
+
+> **Say this accurately.** The code paths are handled and the failure modes degrade rather than crash. That
+> is *not* the same as "tested on Windows", and the README does not claim it is.
+
+---
+
 ## 9. Testing it
 
 ⚙️ The file in this repo **is** the file that runs, so edit and the next render shows it.
 
 ```bash
 # real data — the last live payload doubles as a fixture
-node claude/statusline.js < ~/.cache/statusline-last.json
+node statusline.js < ~/.cache/statusline-last.json
 
 # at a specific width (this is exactly how the harness does it)
-COLUMNS=80 node claude/statusline.js < ~/.cache/statusline-last.json
+COLUMNS=80 node statusline.js < ~/.cache/statusline-last.json
 
 # degenerate input — must still exit 0
-echo '{}'       | node claude/statusline.js
-echo 'not json' | node claude/statusline.js; echo "exit=$?"
+echo '{}'       | node statusline.js
+echo 'not json' | node statusline.js; echo "exit=$?"
 ```
 
 📘 The docs' own suggested smoke test:
 
 ```bash
-echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/home/user/project"},"context_window":{"used_percentage":25},"session_id":"test"}' | node claude/statusline.js
+echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/home/user/project"},"context_window":{"used_percentage":25},"session_id":"test"}' | node statusline.js
 ```
 
 > ⚠️ **Measure display width with a character-aware tool, not `awk`/`wc -c`.** `█` is three bytes, so
@@ -473,21 +564,24 @@ Remaining known trade-offs, stated rather than hidden:
 
 ## 12. History — and the mistakes worth keeping
 
-Built over a single session; several turns were wrong before they were right. They're recorded because each
-is a trap the next person can fall into.
+Built over a couple of sessions; several turns were wrong before they were right. Recorded because each is
+a trap the next person can fall into.
 
 - **Built against 4 guessed fields**, then rebuilt against the full payload once a live render was
-  captured. **This is why the script caches every payload** — so the contract stays verified from fact
-  instead of decaying into someone's recollection.
-- **The payload cache was written non-atomically at first**, and a live render truncated it mid-read.
-  Now write-then-rename.
+  captured. **This is why the script caches every payload** — the contract stays verified from fact
+  instead of decaying into recollection.
+- **The payload cache was written non-atomically**, and a live render truncated it mid-read. Now
+  write-then-rename.
 - **"The terminal is 80 columns" — wrong.** That came from `tput cols` in a *different shell*, which
   measures that shell's pty. The real terminal was 214. Where you measure is part of the measurement.
 - **`tput cols` inside the script appeared to work** and returned the right answer. Luck: ncurses reads
-  `$COLUMNS` itself, the variable the docs tell you to read directly. **"It works" is not "it's correct."**
+  `$COLUMNS` itself — the variable the docs tell you to read directly. **"It works" is not "it's correct."**
 - **A minimum bar width made things worse** — clamping to ≥6 cells didn't rescue a narrow terminal, it
   overflowed instead. Degrade *content*, never legibility.
 - **Renaming a label broke the layout**, because the width budget had the old label's length baked in.
   Sum budgets from the actual strings.
 - **`awk`/`wc -c` count bytes, and `█` is three of them.** Byte-counting called a 76-column line 158, then
   called a real overflow fine. Measure display width character-aware, after stripping ANSI.
+- **`~/.cache` was assumed to exist.** True on Linux by convention, false on Windows and a fresh macOS —
+  so every cache write failed silently and a 130 KB file was re-read on every render, with the bar still
+  looking perfectly correct. Silent, invisible, and only found by auditing for platform assumptions.

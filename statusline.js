@@ -23,9 +23,22 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { execFileSync } = require('child_process');
 
-const CACHE = path.join(process.env.HOME || '/tmp', '.cache');
+// ── platform ─────────────────────────────────────────────────────────────────
+// os.homedir() rather than $HOME: on Windows the variable is USERPROFILE, so
+// $HOME is undefined and `path.join(undefined, ...)` THROWS. Every home-relative
+// path goes through HOME below. os.tmpdir() likewise — '/tmp' is not a path on
+// Windows.
+const WIN = process.platform === 'win32';
+const HOME = os.homedir() || os.tmpdir();
+const CACHE = path.join(HOME, '.cache');
+// ~/.cache exists by convention on Linux but NOT on Windows or a fresh macOS.
+// Without this, every cache write fails silently and the 130 KB identity file
+// is re-read on every single render — a real cost, invisible because the bar
+// still looks right.
+try { fs.mkdirSync(CACHE, { recursive: true }); } catch { /* read-only home; caching is optional */ }
 
 // ── configuration ────────────────────────────────────────────────────────────
 /**
@@ -76,7 +89,7 @@ function loadConfig(argv) {
   };
 
   const file = process.env.STATUSLINE_CONFIG ||
-    path.join(process.env.HOME || '', '.claude', 'statusline.json');
+    path.join(HOME, '.claude', 'statusline.json');
   try {
     const j = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (j && typeof j === 'object') {
@@ -182,6 +195,7 @@ function cached(name, ttlMs, produce) {
 function termWidth() {
   const n = parseInt(process.env.COLUMNS, 10);
   if (n >= 40 && n <= 500) return { w: n, src: 'COLUMNS' };
+  if (WIN) return { w: 80, src: 'default' };   // no tput; don't spawn a doomed process each render
   try {
     const t = parseInt(execFileSync('tput', ['cols'], {
       encoding: 'utf8', stdio: ['inherit', 'pipe', 'ignore'],
@@ -541,10 +555,19 @@ function layBy(order, items) {
 /** Working directory. Basename only on a narrow terminal — the parent rarely earns its columns. */
 function dirSeg(d, W) {
   const cwd = d.workspace?.current_dir || d.cwd || process.cwd();
-  const home = process.env.HOME || '';
-  let p = home && cwd.startsWith(home) ? '~' + cwd.slice(home.length) : cwd;
-  const parts = p.split('/').filter(Boolean);
-  if (parts.length > (W >= 120 ? 2 : 1)) p = parts.slice(W >= 120 ? -2 : -1).join('/');
+  // Split on EITHER separator: Claude Code may hand us a Windows path, and
+  // splitting only on '/' would treat `C:\Users\me\code` as one component,
+  // so nothing would ever shorten.
+  const under = WIN
+    ? cwd.toLowerCase().startsWith(HOME.toLowerCase())
+    : cwd.startsWith(HOME);
+  let p = under ? '~' + cwd.slice(HOME.length) : cwd;
+  const parts = p.split(/[\\/]+/).filter(Boolean);
+  const keep = W >= 120 ? 2 : 1;
+  // Always render with '/' — a status line is not a path you paste, and mixed
+  // separators read worse than consistent ones.
+  if (parts.length > keep) p = parts.slice(-keep).join('/');
+  else p = parts.join('/') || p;
   return seg('dir', blue(p));
 }
 
@@ -713,7 +736,7 @@ function diffSeg(d) {
  */
 function userSeg() {
   const email = cached('identity', 6 * 3600 * 1000, () => {
-    const raw = fs.readFileSync(path.join(process.env.HOME, '.claude.json'), 'utf8');
+    const raw = fs.readFileSync(path.join(HOME, '.claude.json'), 'utf8');
     // Targeted match rather than JSON.parse: on a cache miss this still only
     // scans, and never materialises a 130 KB object graph.
     const m = raw.match(/"emailAddress"\s*:\s*"([^"]+)"/);

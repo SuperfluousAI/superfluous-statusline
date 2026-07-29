@@ -47,9 +47,31 @@ under-using      weekly ███▎░░░░░░░░░░░░░░�
 ## Requirements
 
 - **Claude Code** — v2.1.153+ recommended (that's when `COLUMNS` started being exported; older versions
-  fall back to a subprocess, then to 80 columns)
+  fall back to 80 columns)
 - **Node.js 18+**
-- A terminal with ANSI colour and Unicode block glyphs — any modern one
+- A terminal with ANSI colour and Unicode block glyphs (`█ ░ ▏▎▍▌▋▊▉ ┃`)
+
+### Platform support — stated honestly
+
+| Platform | Status |
+|---|---|
+| **Linux** | ✅ developed and tested here |
+| **macOS** | ⚠️ every code path is handled; **not run on a Mac.** Expected to work — it's the same POSIX paths as Linux |
+| **Windows** | ⚠️ every Windows-specific path is handled and simulated (see below); **not run on Windows** |
+
+Windows needed real fixes, not just goodwill: `$HOME` is undefined there (`USERPROFILE` instead) and the
+old code **threw**; paths are `\`-separated so the directory never shortened; NTFS is case-insensitive so
+the `~` substitution missed; `tput` doesn't exist; and `~/.cache` isn't created for you — which also
+turned out to be a **silent bug on fresh macOS installs**, where every cache write failed and a 130 KB
+file was re-read on every render while the bar still looked perfectly fine.
+
+Simulated and verified on Linux: Windows-shaped paths (`C:\Users\…`, drive roots, UNC `\\server\share`),
+`HOME` unset, missing cache dir, missing `git`, non-repo directories, and a read-only home.
+
+**Not verified** — no Mac or Windows machine was available: that your terminal renders bright ANSI, that
+your font has the block glyphs, that Claude Code exports `COLUMNS` on Windows (if it doesn't, the bar
+falls back to 80 columns — it degrades, it doesn't break), and that `git.exe` resolves. **If you run this
+on macOS or Windows, please open an issue either way** — a confirmation is as useful as a bug.
 
 ## Install
 
@@ -76,6 +98,25 @@ under. Print one with:
 ```bash
 echo "node \"$HOME/.claude/superfluous-statusline/statusline.js\""
 ```
+
+### On Windows
+
+Same steps, with one trap. **Use forward slashes in the path, even on Windows.** Anthropic's docs are
+explicit: with Git Bash installed, backslashes in the `command` string are consumed as escape characters
+before your script ever runs.
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "node \"C:/Users/you/.claude/superfluous-statusline/statusline.js\"",
+    "refreshInterval": 30
+  }
+}
+```
+
+Config and caches live under `%USERPROFILE%` (`.claude\statusline.json`, `.cache\statusline-*`) — the
+script resolves your home directory itself rather than reading `$HOME`, which doesn't exist there.
 
 The bar appears on the next update (a new message, `/compact`, or within `refreshInterval` seconds). No
 restart needed.
