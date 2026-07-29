@@ -367,12 +367,14 @@ correctly omit themselves.
 **No `ctx` bar at the start.** Context fields are `null` until the first API response, and again right
 after `/compact`.
 
-**The email is wrong or missing.** It's read from `~/.claude.json` (`oauthAccount.emailAddress`) and cached
-for 6 hours — this is your **Claude** account, not `git config user.email`. Force a refresh with
-`rm ~/.cache/statusline-identity`.
+**The email is wrong or missing.** It's read from `~/.claude.json` (`oauthAccount.emailAddress`) — your
+**Claude** account, not `git config user.email`, which is often a different address. It's read **fresh on
+every render and never cached**, so `/login` and account switching show up immediately with nothing to
+clear. `--doctor` prints the account it resolved and when that file last changed.
 
 **The dirty `*` is stale.** The `git status` behind it is cached for 4 seconds, deliberately, to keep the
-script off the hot path.
+script off the hot path. That cache leaves one small file per repo in `~/.cache/` — a byte each, safe to
+delete any time.
 
 **Boxes or `?` instead of bars.** Your terminal font lacks the block glyphs. Use a font with good Unicode
 coverage, or swap the characters in `meter()` for `#` and `-`.
