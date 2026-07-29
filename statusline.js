@@ -13,7 +13,7 @@
  *   width  = process.env.COLUMNS (exported by the harness; NOT tput — see §5)
  *
  * Point ~/.claude/settings.json at this file by absolute path (or run
- * `node statusline.js install`), so the file you edit IS the file that runs.
+ * `npx superfluous-statusline install`), so the file you edit IS the one that runs.
  *
  * Every segment carries a LABEL. A bare value teaches nothing: "$34.02" and
  * "main" only read as cost and branch once you already know the layout.
@@ -379,8 +379,50 @@ if (process.argv.includes('--subagent')) { subagentMode(); return; }
 function install(remove) {
   const dir = path.join(HOME, '.claude');
   const file = path.join(dir, 'settings.json');
-  const self = path.resolve(__filename);
   const say = (icon, msg) => console.log(`  ${icon} ${msg}`);
+
+  // WHERE ARE WE RUNNING FROM? This decides whether the path we write into
+  // settings.json will still exist tomorrow.
+  //
+  // `npx superfluous-statusline install` executes from ~/.npm/_npx/<hash>/…,
+  // a CACHE directory npm is free to evict. Writing that path into
+  // settings.json would work today and leave a blank bar whenever the cache is
+  // cleaned — the worst kind of failure, because nothing errors and the cause
+  // is weeks in the past. Same for a plain node_modules install.
+  //
+  // So: from a transient location we COPY ourselves somewhere stable and point
+  // at the copy. npx is the installer, not the runtime. From a git clone we
+  // point at the clone, so `git pull` keeps updating the live file.
+  const here = path.resolve(__filename);
+  const transient = /[\\/](?:_npx|node_modules)[\\/]/.test(here);
+  let self = here;
+
+  if (!remove && (transient || process.argv.includes('--copy'))) {
+    const home = path.join(dir, 'superfluous-statusline');
+    const dest = path.join(home, 'statusline.js');
+    try {
+      fs.mkdirSync(home, { recursive: true });
+      fs.copyFileSync(here, dest);
+      try { fs.chmodSync(dest, 0o755); } catch { /* not fatal */ }
+      // Bring the skill along. Pointing someone at a path inside the npx cache
+      // is pointing them at a directory that will be deleted — the exact
+      // problem this whole copy exists to avoid.
+      const srcSkill = path.join(path.dirname(here), 'skill');
+      if (fs.existsSync(srcSkill)) {
+        try { fs.cpSync(srcSkill, path.join(home, 'skill'), { recursive: true }); }
+        catch { /* optional extra */ }
+      }
+      self = dest;
+      say(green('✓'), `copied     ${gray(dest)}`);
+      if (transient) {
+        say(gray(' '), gray('(ran from a temporary npx cache — pointing at the copy instead,'));
+        say(gray(' '), gray(' because that cache can be evicted at any time)'));
+      }
+    } catch (e) {
+      say(red('✗'), `could not copy to ${home} — ${e.message}`);
+      process.exit(1);
+    }
+  }
 
   let settings = {}, existed = false;
   try {
@@ -445,12 +487,18 @@ function install(remove) {
       rate_limits: { five_hour: { used_percentage: 36 }, seven_day: { used_percentage: 68 } },
     });
     try {
-      const out = execFileSync(process.execPath, [self], {
+      const out = execFileSync(process.execPath, [self], {   // the installed copy, not where we ran from
         input: demo, encoding: 'utf8', env: { ...process.env, COLUMNS: '120' },
       });
       console.log(`\n  preview\n${out.split('\n').map(l => '    ' + l).join('\n')}\n`);
     } catch { say(yellow('!'), 'installed, but the preview render failed — run --doctor'); }
     say(gray('→'), 'appears on the next update (a new message, /compact, or 30s)');
+    // Reference the INSTALLED copy, never where we happened to run from.
+    const skill = path.join(path.dirname(self), 'skill', 'statusline-config');
+    if (fs.existsSync(skill)) {
+      say(gray('→'), gray(`optional skill:  cp -r "${skill}" ~/.claude/skills/`));
+    }
+    say(gray('→'), gray(`check it any time: node "${self}" --doctor`));
   }
 }
 

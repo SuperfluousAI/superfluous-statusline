@@ -76,8 +76,7 @@ on macOS or Windows, please open an issue either way** — a confirmation is as 
 ## Install
 
 ```bash
-git clone https://github.com/SuperfluousAI/superfluous-statusline.git ~/.claude/superfluous-statusline
-node ~/.claude/superfluous-statusline/statusline.js install
+npx superfluous-statusline install
 ```
 
 That's it. `install` writes the config into `~/.claude/settings.json` — **merging**, so your other
@@ -97,7 +96,21 @@ settings are untouched — backs up the old file first, and prints the bar rende
 ```
 
 It refuses to touch `settings.json` if it isn't valid JSON, rather than overwriting a file it can't read.
-`node statusline.js uninstall` reverses it.
+
+**npx is the installer, not the runtime.** `npx` executes from `~/.npm/_npx/<hash>/`, a cache npm may
+evict at any time — writing *that* path into `settings.json` would work today and leave you with a blank
+bar weeks later, with nothing to explain it. So when it detects a temporary location, `install` copies
+itself (and the skill) to `~/.claude/superfluous-statusline/` and points there. Verified: the bar still
+renders after the npx cache is deleted.
+
+**Prefer a git clone?** Then the file you edit is the file that runs, and `git pull` updates it live:
+
+```bash
+git clone https://github.com/SuperfluousAI/superfluous-statusline.git ~/.claude/superfluous-statusline
+node ~/.claude/superfluous-statusline/statusline.js install
+```
+
+To reverse either: `npx superfluous-statusline uninstall` (or `node statusline.js uninstall`).
 
 <details>
 <summary>Or configure it by hand</summary>
@@ -151,7 +164,7 @@ Every way a status line can fail is **silent** — a script that exits non-zero,
 never wired up all look identical: a blank bar, no error anywhere. So don't guess:
 
 ```bash
-node statusline.js --doctor
+npx superfluous-statusline --doctor      # or: node statusline.js --doctor
 ```
 
 ```
@@ -320,7 +333,8 @@ catalogued in [`docs/how-it-works.md` §6](docs/how-it-works.md).
 **Or just ask Claude.** Copy the bundled skill in and it'll do it conversationally:
 
 ```bash
-mkdir -p ~/.claude/skills && cp -r skill/statusline-config ~/.claude/skills/
+mkdir -p ~/.claude/skills
+cp -r ~/.claude/superfluous-statusline/skill/statusline-config ~/.claude/skills/
 ```
 
 Then `/statusline-config hide my email and the cost` — it reads the live config, edits the file, and shows
@@ -367,6 +381,7 @@ coverage, or swap the characters in `meter()` for `#` and `-`.
 
 ```
 statusline.js               the whole thing — one file, no dependencies
+package.json                npm manifest (bin: superfluous-statusline)
 skill/statusline-config/    optional Claude Code skill: configure the bar by asking
 docs/how-it-works.md        the status line feature documented in depth (official contract + this
                             build), the full stdin field reference, and the mistakes made getting here
