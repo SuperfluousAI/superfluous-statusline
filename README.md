@@ -41,7 +41,8 @@ under-using      weekly ███▎░░░░░░░░░░░░░░�
 - **It can't blank your bar.** Every segment is independently sandboxed and the script always exits 0 — a
   status line that crashes disappears with no error shown anywhere.
 - **It's fast.** No `git status` on the hot path: the branch is read straight from `.git/HEAD`, the dirty
-  check is cached. ~66 ms per render.
+  check is cached. **~40 ms median per render, ~25 ms of which is node starting up** — the floor, not this
+  script.
 - **Zero dependencies.** One file, Node's standard library only.
 
 ## Requirements

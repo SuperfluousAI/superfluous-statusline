@@ -247,9 +247,10 @@ the script survive a Claude Code update that renames something.
 4. ⚙️ **Colour is a signal, not decoration.** Green/yellow/red mean headroom/attention/urgent.
 5. ⚙️ **Cheap.** 📘 The docs warn the script runs frequently and that `git status` causes lag. So:
    the branch is read straight from `.git/HEAD` (**no subprocess at all**), and the only remaining shell
-   call — the dirty check — goes through a **4s TTL disk cache**. The account email, which lives in a
-   ~130 KB `~/.claude.json`, is cached for 6h and matched by regex rather than `JSON.parse`. Measured
-   ~66 ms per warm render.
+   call — the dirty check — goes through a **4s TTL disk cache**. The account email is read **fresh every
+   render** from the ~129 KB `~/.claude.json` — measured at 0.6 ms, so caching it was never worth a
+   staleness window. Measured **~40 ms median per render**, of which ~25 ms is bare node startup: the floor,
+   not our code.
 6. ⚙️ **3-second stdin guard.** If the pipe never closes, exit quietly rather than hang the UI.
 7. ⚙️ **Bright colours, not dim.** Bright ANSI slots (90–97) + bold, never SGR 2 — bright slots follow the
    terminal's own theme, unlike hard-coded `38;5;N`. Gray (90) for separators and secondary labels only.
@@ -620,7 +621,7 @@ Remaining known trade-offs, stated rather than hidden:
   **0.6 ms** to read and scan the 129 KB file, against a ~40 ms render. The cache was defending 1.5% of a
   render and risking a stale identity.
 - `refreshInterval: 30` means the script runs on a timer forever, even when idle. That is the price of a
-  live countdown; the work per run is ~66 ms and mostly cached.
+  live countdown; the work per run is ~40 ms median, ~25 ms of which is node startup.
 
 ---
 
@@ -689,7 +690,8 @@ Remaining known trade-offs, stated rather than hidden:
   ever sends only the latter.
 - **2026-07-29** — **`/login` no longer leaves a stale account on the bar.** The email was cached on a 6-hour
   time-based TTL, so switching accounts showed the previous one for hours; worse, that had been written down
-  as a known gotcha rather than fixed. The cache is now keyed on the **mtime of the file the value comes
+  as a known gotcha rather than fixed. **(Superseded same day — see the final entry: the cache was removed
+  entirely once its cost was measured.)** The cache was keyed on the **mtime of the file the value comes
   from**, which `/login` rewrites — correct on the next render, and still one `stat()` instead of re-reading
   130 KB. `cached()` gained a general `stamp` parameter for this: a TTL alone is a bet that the data won't
   change sooner, and that bet was wrong. `--doctor` now prints the resolved account and when it last

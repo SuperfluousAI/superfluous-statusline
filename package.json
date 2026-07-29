@@ -1,6 +1,6 @@
 {
   "name": "superfluous-statusline",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "A status line for Claude Code \u2014 context and plan rate-limit meters with pace ticks, labelled segments, width-adaptive. One file, zero dependencies.",
   "keywords": [
     "claude",
