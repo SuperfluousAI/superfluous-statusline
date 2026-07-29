@@ -5,22 +5,37 @@ and how much of your plan you've burned** — with real progress bars for contex
 windows.
 
 ```
-dir code/my-project | branch main* | model Opus 5 1M | cost $14.42 | diff +1139/-40 | user you@example.com
-ctx █████████████████░░░░░░░░░░░ 61% | active session ██████████░░░░░░░░░░░░░░░░░░ 36% resets in 10m | weekly ███████████████████░░░░░░░░░ 68% resets in 14h
+dir code/my-project | branch main* | model Opus 5 1M | user you@example.com
+cost $14.42 $6.40/h | elapsed 2h14m 27% api | effort medium | cache 94% | diff +1139/-40
+ctx █████████████████░░░░░░░░░░░ 61% | active session ██████████░░░░┃░░░░░░░░░░░░░ 36% resets in 10m | weekly ████████┃██████████░░░░░░░░░ 68% cap in ~22h
 ```
 
 **The part you can't get anywhere else:** your **5-hour** and **7-day** plan usage, with a countdown to
 each reset. Claude Code knows both and surfaces neither — the 7-day window in particular is invisible
 until you're already up against it.
 
+**And the part that makes it actionable:** a **pace tick** (`┃`) on each meter showing where you'd be at
+an even burn. Fill past the tick means you're going faster than the window replenishes — and if the
+current rate would hit the cap *before* the reset, the countdown flips to say so:
+
+```
+on pace          weekly ███████████▎┃░░░░░░░░░░░░░░░ 41%  resets in 4d
+ahead of pace    weekly ████████┃██████████░░░░░░░░░ 68%  cap in ~22h35m
+under-using      weekly ███▎░░░░░░░░░░░░░░░░┃░░░░░░░ 12%  resets in 2d
+```
+
+68% is fine on day six and alarming on day two. The tick is what tells you which one you're in.
+
 ## Why you might want this one
 
 - **Real meters, not numbers.** Eighth-block bars (`▏▎▍▌▋▊▉`) so they move smoothly, colour-coded by
-  headroom.
+  headroom, with pace ticks on the plan windows.
+- **Session economics.** Spend rate per hour, elapsed wall-clock and what share of it was actually spent
+  waiting on the API, reasoning effort, and cache-hit ratio.
 - **Every segment is labelled.** `cost $14.42`, not a bare `$14.42` you have to decode by position.
-- **It fits your terminal.** Sizes itself from `COLUMNS`, collapses to one line when there's room, splits
-  to two when there isn't, drops the least important segments before it would ever wrap. Verified from 60
-  to 250 columns.
+- **It fits your terminal.** Sizes itself from `COLUMNS`. Three groups — identity, economics, meters —
+  packed into as few lines as fit, with the least important segments dropped before it would ever wrap.
+  Verified from 60 to 250 columns.
 - **It can't blank your bar.** Every segment is independently sandboxed and the script always exits 0 — a
   status line that crashes disappears with no error shown anywhere.
 - **It's fast.** No `git status` on the hot path: the branch is read straight from `.git/HEAD`, the dirty
@@ -95,7 +110,8 @@ It's one readable file; edit it directly.
 
 | Want to | Do this |
 |---|---|
-| Remove a segment | Delete its line from the `l1items` array in `render()` |
+| Remove a segment | Delete its line from `l1items` (identity) or `ecoItems` (economics) in `render()` |
+| Turn off pace ticks | Pass `showPace: false` in the `buildMeters` variants |
 | Reorder segments | Edit the `ORDER` array |
 | Change what's dropped first when space is tight | Change the priority numbers in `l1items` (higher = kept longer) |
 | Change bar characters | `meter()` — `█` filled, `░` track, `EIGHTHS` for the leading edge |
@@ -103,8 +119,8 @@ It's one readable file; edit it directly.
 | Make bars wider/narrower | The `Math.min(28, …)` cap in `buildMeters()` |
 | Hide the email | Delete the `userSeg()` line from `l1items` |
 
-Fields available but not used by default — `pr`, `vim`, `agent`, `worktree`, `effort`, `session_name`,
-`thinking`, cache-hit counts — are catalogued in
+Fields available but not shown by default — `session_name`, `output_style`, `exceeds_200k_tokens`,
+`workspace.added_dirs`, `transcript_path` — are catalogued in
 [`docs/how-it-works.md` §6](docs/how-it-works.md).
 
 ## Troubleshooting

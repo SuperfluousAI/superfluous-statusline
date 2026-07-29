@@ -112,15 +112,76 @@ const EIGHTHS = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
  * edge sub-cell precision so it advances smoothly. Filled portion takes the
  * tint; the track stays gray so the boundary is unmistakable — that is the
  * whole point of a bar over a number.
+ *
+ * `markPct` draws a PACE TICK: one cell replaced by `┃`, marking where the
+ * fill *would* be if you burned the window evenly. Fill past the tick = ahead
+ * of pace. It's drawn per-cell rather than by string concatenation because the
+ * tick can land inside either the filled run or the track.
  */
-function meter(pct, width, tint) {
+function meter(pct, width, tint, markPct) {
   const p = Math.max(0, Math.min(100, pct)) / 100;
   const exact = p * width;
   const full = Math.floor(exact);
   const frac = Math.floor((exact - full) * 8);
-  const head = full < width ? EIGHTHS[frac] : '';
-  const track = Math.max(0, width - full - (head ? 1 : 0));
-  return tint('█'.repeat(full) + head) + gray('░'.repeat(track));
+
+  const cells = [];
+  for (let i = 0; i < width; i++) {
+    if (i < full) cells.push(['fill', '█']);
+    else if (i === full && frac > 0) cells.push(['fill', EIGHTHS[frac]]);
+    else cells.push(['track', '░']);
+  }
+  if (typeof markPct === 'number' && markPct >= 0 && markPct <= 100 && width > 1) {
+    cells[Math.min(width - 1, Math.floor((markPct / 100) * width))] = ['mark', '┃'];
+  }
+
+  const paint = (k, s) => (k === 'fill' ? tint(s) : k === 'mark' ? white(s) : gray(s));
+  let out = '', run = '', kind = null;
+  for (const [k, ch] of cells) {
+    if (k !== kind) { if (run) out += paint(kind, run); run = ''; kind = k; }
+    run += ch;
+  }
+  if (run) out += paint(kind, run);
+  return out;
+}
+
+/** Milliseconds → compact "2h14m" / "14m" / "45s". */
+function dur(ms) {
+  if (!(ms > 0)) return '';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return h < 24 ? `${h}h${String(m % 60).padStart(2, '0')}m` : `${Math.floor(h / 24)}d${h % 24}h`;
+}
+
+/**
+ * Pace + projection for one rate-limit window.
+ *
+ * `resets_at` is the END of the window, and the window length is known (5h or
+ * 7d), so elapsed time is derivable — and with it, the two questions the raw
+ * percentage can't answer:
+ *   pace  — where the fill *should* be if the window were burned evenly
+ *   capAt — if the current burn rate holds, when does it hit 100%?
+ *
+ * The projection only matters when it lands BEFORE the reset; otherwise the
+ * window replenishes first and there is nothing to warn about.
+ */
+function pace(v, windowMs) {
+  if (!v?.resets_at) return {};
+  const msLeft = v.resets_at * 1000 - Date.now();
+  if (!(msLeft > 0) || msLeft > windowMs) return {};      // reset in the past, or a window we can't reason about
+  const elapsed = windowMs - msLeft;
+  if (elapsed <= 60_000) return {};                        // just reset: rate is noise
+  const pacePct = (elapsed / windowMs) * 100;
+  const used = v.used_percentage;
+  const ratePerMs = used / elapsed;                        // % per ms
+  let capIn = '';
+  if (ratePerMs > 0 && used > pacePct) {
+    const msToCap = (100 - used) / ratePerMs;
+    if (msToCap < msLeft) capIn = dur(msToCap);
+  }
+  return { pacePct, capIn };
 }
 
 /** Seconds-since-epoch → compact "42m" / "3h" / "2d". */
@@ -211,19 +272,13 @@ function render(d, W) {
     [65, safe(() => agentSeg(d))],
     [60, safe(() => vimSeg(d))],
     [55, safe(() => userSeg())],
-    [50, safe(() => costSeg(d))],
-    [40, safe(() => diffSeg(d))],
     [30, safe(() => repoSeg(d))],        // usually implied by dir
   ].filter(([, s]) => s);
 
   // Display order is not priority order — read left-to-right as where/what/who.
-  const ORDER = ['dir', 'repo', 'branch', 'worktree', 'pr', 'model', 'agent', 'vim',
-                 'cost', 'diff', 'user'];
+  const ORDER = ['dir', 'repo', 'branch', 'worktree', 'pr', 'model', 'agent', 'vim', 'user'];
   const labelOf = s => (s.replace(/\x1b\[[0-9;]*m/g, '').split(' ')[0]);
-  const lay = items => items
-    .slice()
-    .sort((x, y) => ORDER.indexOf(labelOf(x[1])) - ORDER.indexOf(labelOf(y[1])))
-    .map(([, s]) => s);
+  const lay = items => layBy(ORDER, items);
 
   // Shorten the email before sacrificing a whole segment — the local part still
   // answers "which account is this?", which is the reason it's on the bar.
@@ -248,24 +303,31 @@ function render(d, W) {
   // cheaper variants and take the first that FITS, measured on the rendered
   // string rather than predicted. Degrading content beats degrading legibility.
   const hasCtx = typeof d.context_window?.remaining_percentage === 'number';
+  const H = 3600_000, D = 24 * H;
   const raw = [
-    ['active session', '5h', d.rate_limits?.five_hour],
-    ['weekly', '7d', d.rate_limits?.seven_day],
+    ['active session', '5h', d.rate_limits?.five_hour, 5 * H],
+    ['weekly', '7d', d.rate_limits?.seven_day, 7 * D],
   ].filter(([, , v]) => typeof v?.used_percentage === 'number');
-  const resetLabel = r => ` resets in ${r}`;
   const meters = (hasCtx ? 1 : 0) + raw.length;
 
-  const buildMeters = ({ short, showReset }) => {
+  // Trailing text per window: normally the reset countdown, but when the burn
+  // rate projects a cap BEFORE the reset, that is the more urgent fact and it
+  // replaces it — "resets in 2d" is cold comfort if you run out in 14h.
+  const tailFor = (v, windowMs, showTail) => {
+    if (!showTail) return { text: '', tint: gray };
+    const { capIn } = pace(v, windowMs);
+    if (capIn) return { text: ` cap in ~${capIn}`, tint: yellow };
+    const r = v.resets_at ? until(v.resets_at) : '';
+    return r ? { text: ` resets in ${r}`, tint: gray } : { text: '', tint: gray };
+  };
+
+  const buildMeters = ({ short, showTail, showPace }) => {
     if (!meters) return [];
     const PCT_W = 5;                       // "100%" + the separating space
     const lbl = ([long, code]) => (short ? code : long);
-    const rs = v => (showReset && v.resets_at && until(v.resets_at) ? until(v.resets_at) : '');
     const fixed =
       (hasCtx ? 'ctx '.length + PCT_W : 0) +
-      raw.reduce((a, w) => {
-        const r = rs(w[2]);
-        return a + lbl(w).length + 1 + PCT_W + (r ? resetLabel(r).length : 0);
-      }, 0) +
+      raw.reduce((a, w) => a + lbl(w).length + 1 + PCT_W + tailFor(w[2], w[3], showTail).text.length, 0) +
       (meters - 1) * PIPE_W;
     const bw = Math.min(28, Math.floor((W - fixed - 1) / meters));
     if (bw < 6) return null;               // this variant cannot fit — try the next
@@ -279,29 +341,72 @@ function render(d, W) {
     for (const w of raw) {
       const v = w[2];
       const pct = Math.round(v.used_percentage);
-      const tint = pct >= 90 ? red : pct >= 75 ? yellow : pct >= 50 ? cyan : green;
-      const r = rs(v);
-      outSeg.push(gray(lbl(w) + ' ') + meter(pct, bw, tint) + ' ' + tint(pad(`${pct}%`, 4)) +
-                  (r ? gray(resetLabel(r)) : ''));
+      const { pacePct } = showPace ? pace(v, w[3]) : {};
+      // Ahead of pace is the signal, so it escalates the colour a step even
+      // when the raw percentage alone would still read as comfortable.
+      const behind = typeof pacePct === 'number' && pct > pacePct;
+      const tint = pct >= 90 ? red : pct >= 75 ? yellow : behind ? yellow : pct >= 50 ? cyan : green;
+      const t = tailFor(v, w[3], showTail);
+      outSeg.push(gray(lbl(w) + ' ') + meter(pct, bw, tint, pacePct) + ' ' +
+                  tint(pad(`${pct}%`, 4)) + t.tint(t.text));
     }
     return outSeg;
   };
 
-  let l2 = [];
-  for (const variant of [{ short: false, showReset: true },
-                         { short: true, showReset: true },
-                         { short: true, showReset: false }]) {
+  let meterLine = [];
+  for (const variant of [{ short: false, showTail: true, showPace: true },
+                         { short: true, showTail: true, showPace: true },
+                         { short: true, showTail: false, showPace: true }]) {
     const built = buildMeters(variant);
-    if (built && vlen(built.join(' | ')) <= W - 1) { l2 = built; break; }
-    if (built) l2 = built;                 // keep the least-bad as a floor
+    if (built && vlen(built.join(' | ')) <= W - 1) { meterLine = built; break; }
+    if (built) meterLine = built;           // keep the least-bad as a floor
   }
 
-  // Single line if the terminal is genuinely wide enough for both halves.
-  // W - 1, not W: a glyph in the final column makes some terminals wrap.
-  const a = l1.join(PIPE), b = l2.join(PIPE);
-  const one = [a, b].filter(Boolean).join(PIPE);
-  if (vlen(one) <= W - 1) return tidy(one);
-  return [a, b].filter(Boolean).map(tidy).join('\n');
+  // ── economics group ──
+  // Kept apart from identity because it answers a different question: not
+  // "where am I" but "what is this session costing me, and how hard is it
+  // thinking". Same priority-drop treatment.
+  let ecoItems = [
+    [90, safe(() => costSeg(d))],
+    [80, safe(() => elapsedSeg(d))],
+    [70, safe(() => effortSeg(d))],
+    [50, safe(() => cacheSeg(d))],
+    [40, safe(() => diffSeg(d))],
+  ].filter(([, s]) => s);
+  const ECO_ORDER = ['cost', 'elapsed', 'effort', 'cache', 'diff'];
+  const fitEco = () => {
+    let out = layBy(ECO_ORDER, ecoItems);
+    while (vlen(out.join(PIPE)) > W - 1 && ecoItems.length > 1) {
+      const min = Math.min(...ecoItems.map(([p]) => p));
+      ecoItems = ecoItems.filter(([p]) => p !== min);
+      out = layBy(ECO_ORDER, ecoItems);
+    }
+    return out;
+  };
+
+  // ── pack the three groups into lines ──
+  // Three logical rows — identity · economics · meters — merged greedily from
+  // the top while they fit. A wide terminal collapses to one line; a narrow one
+  // gets three. Merging is decided by MEASURING the joined string, never by a
+  // width threshold, so it can't drift out of step with the content.
+  const groups = [l1.join(PIPE), fitEco().join(PIPE), meterLine.join(PIPE)].filter(Boolean);
+  const lines = [];
+  for (const g of groups) {
+    if (lines.length) {
+      const merged = lines[lines.length - 1] + PIPE + g;
+      if (vlen(merged) <= W - 1) { lines[lines.length - 1] = merged; continue; }
+    }
+    lines.push(g);
+  }
+  return lines.map(tidy).join('\n');
+}
+
+/** Order segments for display by their label, independent of drop priority. */
+function layBy(order, items) {
+  const labelOf = s => s.replace(/\x1b\[[0-9;]*m/g, '').split(' ')[0];
+  return items.slice()
+    .sort((x, y) => order.indexOf(labelOf(x[1])) - order.indexOf(labelOf(y[1])))
+    .map(([, s]) => s);
 }
 
 // ── segments ─────────────────────────────────────────────────────────────────
@@ -410,11 +515,56 @@ function vimSeg(d) {
   return d.vim?.mode ? seg('vim', yellow(d.vim.mode)) : '';
 }
 
-/** Session spend, once it's worth showing. Client-side estimate, not the bill. */
+/**
+ * Session spend + burn rate. Client-side estimate, not the bill.
+ * The rate needs a few minutes of wall-clock before it means anything — early
+ * on, one expensive call divided by 40 seconds reads as $400/h.
+ */
 function costSeg(d) {
   const c = d.cost?.total_cost_usd;
   if (typeof c !== 'number' || c < 0.01) return '';
-  return seg('cost', magenta(`$${c.toFixed(2)}`));
+  const ms = d.cost?.total_duration_ms;
+  const perHour = ms > 5 * 60_000 ? c / (ms / 3600_000) : null;
+  return seg('cost', magenta(`$${c.toFixed(2)}`) +
+    (perHour ? gray(` $${perHour.toFixed(2)}/h`) : ''));
+}
+
+/** Wall-clock since the session started — not the same as time spent waiting on the API. */
+function elapsedSeg(d) {
+  const t = dur(d.cost?.total_duration_ms);
+  if (!t) return '';
+  // How much of that was actually spent in API calls. Below 10% the session is
+  // mostly you reading, and the ratio stops being interesting.
+  const api = d.cost?.total_api_duration_ms;
+  const share = api > 0 && d.cost?.total_duration_ms > 0
+    ? Math.round((api / d.cost.total_duration_ms) * 100) : null;
+  return seg('elapsed', white(t) + (share >= 10 ? gray(` ${share}% api`) : ''));
+}
+
+/** Reasoning effort — live, so it reflects a mid-session /effort change. */
+function effortSeg(d) {
+  const l = d.effort?.level;
+  if (!l) return '';
+  const tint = l === 'max' || l === 'xhigh' ? magenta : l === 'high' ? cyan : white;
+  return seg('effort', tint(l) + (d.thinking?.enabled === false ? gray(' no-think') : ''));
+}
+
+/**
+ * Cache hit ratio — of the input tokens in the current context, how many came
+ * from cache rather than being re-sent. High is good and cheap; a sudden drop
+ * means the prefix was invalidated and you are paying full freight again.
+ *
+ * Uses the same input-only basis the docs define for `used_percentage`, so the
+ * two numbers are talking about the same denominator.
+ */
+function cacheSeg(d) {
+  const u = d.context_window?.current_usage;
+  if (!u) return '';                                   // null before the first call, and after /compact
+  const total = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
+  if (total < 1000) return '';
+  const pct = Math.round(((u.cache_read_input_tokens || 0) / total) * 100);
+  const tint = pct >= 80 ? green : pct >= 50 ? cyan : yellow;
+  return seg('cache', tint(`${pct}%`));
 }
 
 /** Net lines this session — the "did I actually do anything" signal. */

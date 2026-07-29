@@ -61,7 +61,7 @@ Related keys elsewhere in settings:
 
 ⚙️ Point it at an **absolute path** to wherever you cloned this repo, so the file you edit is the file
 that runs — no copy step, nothing to keep in sync. The cost of that choice: move or delete the clone and
-the status line silently stops rendering, because the harness is running a command that no longer exists.
+the status line silently stops rendering, because the harness runs a command that no longer exists.
 
 ---
 
@@ -269,13 +269,19 @@ the script survive a Claude Code update that renames something.
 ## 8. Our layout
 
 ```
-dir code/my-project | branch main* | model Opus 5 1M | cost $14.42 | diff +1139/-40 | user you@example.com
+dir code/my-project | branch main* | model Opus 5 1M | user you@example.com
 ctx █████████████████████▎░░░░░░ 76%  | active session ███████░░░░░░░░░░░░░░░░░░░░░ 25%  resets in 12m | weekly ██████████████████▍░░░░░░░░░ 66%  resets in 14h
 ```
 
-- **Line 1 — identity.** Where am I, on what, as whom, at what cost.
-- **Line 2 — meters.** Context headroom and both plan windows.
-- Collapses to **one line** whenever everything fits in `W - 1`; the threshold moves with content.
+Three logical groups, **packed greedily into as few lines as fit**:
+
+- **identity** — where am I, on what, as whom
+- **economics** — what is this session costing, and how hard is it thinking
+- **meters** — context headroom and both plan windows
+
+Groups merge from the top while the joined string fits in `W - 1`, so a wide terminal collapses to one or
+two lines and a narrow one gets three. Merging is decided by **measuring**, never by a width threshold, so
+it can't drift out of step with the content. Observed: 2 lines at ≥214 columns, 3 below ~180.
 - ⚙️ Segments are separated by a literal **`|`**, and **every segment is labelled**.
   A bare value teaches nothing — `$14.42` and `main` only read as cost and branch if you already know the
   layout by heart.
@@ -294,9 +300,20 @@ Rendered in reading order — where → what → who — but **dropped in priori
 | 6 | `model` | `model.display_name`, `fast_mode` | 80 | always |
 | 7 | `agent` | `agent.name` | 65 | `--agent` sessions |
 | 8 | `vim` | `vim.mode` | 60 | vim mode on |
-| 9 | `cost` | `cost.total_cost_usd` | 50 | above $0.01 |
-| 10 | `diff` | `cost.total_lines_added/_removed` | 40 | non-zero |
-| 11 | `user` | `~/.claude.json` → `oauthAccount.emailAddress` | 55 | always |
+| 9 | `user` | `~/.claude.json` → `oauthAccount.emailAddress` | 55 | always |
+
+### Economics segments
+
+Split from identity because they answer a different question — not *where am I* but *what is this costing*.
+Same priority-drop treatment.
+
+| Segment | Source | Priority | Shows |
+|---|---|---|---|
+| `cost` | `cost.total_cost_usd` + `total_duration_ms` | 90 | `$14.42 $10.93/h` — the rate is suppressed for the first 5 minutes, when one expensive call over 40s reads as $400/h |
+| `elapsed` | `cost.total_duration_ms`, `total_api_duration_ms` | 80 | `1h19m 27% api` — wall-clock, plus how much of it was actually spent waiting on the API (hidden below 10%) |
+| `effort` | `effort.level`, `thinking.enabled` | 70 | `medium`; `max`/`xhigh` magenta, `high` cyan. Live — reflects a mid-session `/effort` |
+| `cache` | `context_window.current_usage` | 50 | share of context input tokens served from cache. Green ≥80%. A sudden drop means the prefix was invalidated and you're paying full freight |
+| `diff` | `cost.total_lines_added/_removed` | 40 | `+1139/-40` |
 
 **Why priorities.** With every optional field present, line 1 is 250+ columns. Unlike the meters there is
 no cheaper way to render `cost $14.42`, so when the line doesn't fit the **lowest-priority segments are
@@ -330,6 +347,30 @@ jump as digits are gained and lost.
 Bar width is **computed**: fixed costs are summed **from the actual strings** — never assumed, or a rename
 silently mis-sizes everything — subtracted from `COLUMNS`, and the remainder split between the meters,
 capped at 28 cells.
+
+### Pace markers — the thing the raw percentage can't tell you
+
+`resets_at` is the **end** of the window and the window length is known (5h, 7d), so elapsed time is
+derivable — and with it, the two questions a bare "68%" cannot answer.
+
+**The tick (`┃`)** marks where the fill *would* be if you burned the window evenly:
+
+```
+on pace          weekly ███████████▎┃░░░░░░░░░░░░░░░ 41%  resets in 4d
+ahead of pace    weekly ████████┃██████████░░░░░░░░░ 68%  cap in ~22h35m
+under-using      weekly ███▎░░░░░░░░░░░░░░░░┃░░░░░░░ 12%  resets in 2d
+```
+
+Fill **past** the tick means you're burning faster than the window replenishes. That escalates the meter's
+colour one step even when the raw percentage still looks comfortable — being at 68% is fine on day six and
+alarming on day two.
+
+**The projection** replaces the reset countdown when the current burn rate would hit 100% *before* the
+window resets: `cap in ~22h35m` instead of `resets in 2d`. "Resets in 2d" is cold comfort if you run out in
+22 hours. When the projection lands after the reset there's nothing to warn about, so the countdown stays.
+
+Guards: no pace or projection within the first minute of a window (the rate is pure noise), if `resets_at`
+is missing or past, or if the time remaining exceeds the window length (a window we can't reason about).
 
 ### The fallback ladder
 
@@ -432,25 +473,21 @@ Remaining known trade-offs, stated rather than hidden:
 
 ## 12. History — and the mistakes worth keeping
 
-This project was built in one session, and several of the turns were wrong before they were right. They're
-recorded because each one is a trap the next person can fall into.
+Built over a single session; several turns were wrong before they were right. They're recorded because each
+is a trap the next person can fall into.
 
 - **Built against 4 guessed fields**, then rebuilt against the full payload once a live render was
-  captured. The payload is far richer than you'd assume — the rate-limit windows in particular. **This is
-  why the script caches every payload to `~/.cache/statusline-last.json`:** so the contract stays verified
-  from fact instead of decaying into someone's recollection.
-- **The payload cache was written non-atomically at first**, and a live render truncated it mid-read,
-  breaking a test with a JSON decode error. Now write-then-rename.
-- **"The terminal is 80 columns" — wrong.** That came from running `tput cols` in a *different shell*,
-  which measures that shell's pty, not the terminal the bar renders into. The real terminal was 214. Where
-  you measure is part of the measurement.
-- **`tput cols` inside the script appeared to work** and returned the right answer. It was luck: ncurses
-  reads `$COLUMNS` itself, which is the variable the docs tell you to read directly. **"It works" is not
-  "it's correct"** — a wrong mechanism returning the right answer is a bug that hasn't surfaced yet.
-- **A minimum bar width made things worse.** Clamping the bar to ≥6 cells didn't rescue a too-narrow
-  terminal, it just overflowed instead. Degrade *content* (the fallback ladder), never legibility.
+  captured. **This is why the script caches every payload** — so the contract stays verified from fact
+  instead of decaying into someone's recollection.
+- **The payload cache was written non-atomically at first**, and a live render truncated it mid-read.
+  Now write-then-rename.
+- **"The terminal is 80 columns" — wrong.** That came from `tput cols` in a *different shell*, which
+  measures that shell's pty. The real terminal was 214. Where you measure is part of the measurement.
+- **`tput cols` inside the script appeared to work** and returned the right answer. Luck: ncurses reads
+  `$COLUMNS` itself, the variable the docs tell you to read directly. **"It works" is not "it's correct."**
+- **A minimum bar width made things worse** — clamping to ≥6 cells didn't rescue a narrow terminal, it
+  overflowed instead. Degrade *content*, never legibility.
 - **Renaming a label broke the layout**, because the width budget had the old label's length baked in.
-  Budgets must be summed from the actual strings.
-- **`awk`/`wc -c` count bytes, and `█` is three of them.** Byte-counting reported a 76-column line as 158,
-  and later reported a real overflow as fine. Measure display width with a character-aware tool after
-  stripping ANSI.
+  Sum budgets from the actual strings.
+- **`awk`/`wc -c` count bytes, and `█` is three of them.** Byte-counting called a 76-column line 158, then
+  called a real overflow fine. Measure display width character-aware, after stripping ANSI.
