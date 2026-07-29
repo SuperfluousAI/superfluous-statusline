@@ -77,10 +77,32 @@ on macOS or Windows, please open an issue either way** — a confirmation is as 
 
 ```bash
 git clone https://github.com/SuperfluousAI/superfluous-statusline.git ~/.claude/superfluous-statusline
+node ~/.claude/superfluous-statusline/statusline.js install
 ```
 
-Then point Claude Code at it. Either ask Claude — *"set my status line to
-`node ~/.claude/superfluous-statusline/statusline.js`"* — or edit `~/.claude/settings.json` yourself:
+That's it. `install` writes the config into `~/.claude/settings.json` — **merging**, so your other
+settings are untouched — backs up the old file first, and prints the bar rendered as proof:
+
+```
+✓ backed up  ~/.claude/settings.json.bak-2026-07-29T04-00-29-918Z
+✓ statusLine node "/home/you/.claude/superfluous-statusline/statusline.js"
+✓ subagent   node "/home/you/.claude/superfluous-statusline/statusline.js" --subagent
+✓ wrote      ~/.claude/settings.json
+
+  preview
+    dir code/my-project | branch main | model Opus 5
+    ctx ██████████████▋░░░░░░░░░ 61% | active session ████████▋░░░░░░░░░░░░░░░ 36%
+
+→ appears on the next update (a new message, /compact, or 30s)
+```
+
+It refuses to touch `settings.json` if it isn't valid JSON, rather than overwriting a file it can't read.
+`node statusline.js uninstall` reverses it.
+
+<details>
+<summary>Or configure it by hand</summary>
+
+Edit `~/.claude/settings.json`:
 
 ```json
 {
@@ -120,6 +142,47 @@ script resolves your home directory itself rather than reading `$HOME`, which do
 
 The bar appears on the next update (a new message, `/compact`, or within `refreshInterval` seconds). No
 restart needed.
+
+</details>
+
+## Something wrong? Ask the doctor
+
+Every way a status line can fail is **silent** — a script that exits non-zero, prints nothing, or was
+never wired up all look identical: a blank bar, no error anywhere. So don't guess:
+
+```bash
+node statusline.js --doctor
+```
+
+```
+  ok   node v22.14.0 on linux
+  ok   settings.json → this file
+  ok   last real render saw 214 (via COLUMNS)
+  ok   payload cache fresh (1s old), Claude Code 2.1.220
+  warn no refreshInterval — reset countdowns will freeze while the session is idle
+  fail config is not valid JSON, so it is being IGNORED — ~/.claude/statusline.json
+```
+
+It checks whether `settings.json` points at *this* file or a stale copy, whether `disableAllHooks` is
+silently killing it, what width the last **real** render saw, whether your config actually parses, and
+whether git and the cache are usable. Exits non-zero on failure, so you can use it as a check.
+
+## Agent panel rows
+
+`install` also sets up `subagentStatusLine` — a separate Claude Code setting that replaces the default
+`name · description · token count` row for each subagent with something you can actually read:
+
+```
+▶ review:auth █▊░░░░░░░░ 18% 40m opus-5 high Reviewing the session token refresh path for race conditions
+✓ find:callsites █████████░ 91% 25m sonnet-5 Locate every caller of resolveCwd across the repo
+◦ security-auditor 10m Waiting on t1
+✗ flaky █████████▊ 98% 8m haiku-4-5 Broke
+```
+
+Status glyph, name, its **own context meter** (from that agent's token count against its model's window),
+elapsed time, model, effort, and what it's doing. Rows shrink to fit the panel — the description truncates
+before any field is dropped — and a row that can't render keeps Claude Code's default rather than going
+blank. Verified 25–200 columns.
 
 ### Why `refreshInterval: 30`
 
@@ -308,6 +371,15 @@ skill/statusline-config/    optional Claude Code skill: configure the bar by ask
 docs/how-it-works.md        the status line feature documented in depth (official contract + this
                             build), the full stdin field reference, and the mistakes made getting here
 ```
+
+Four entry points in that one file:
+
+| | |
+|---|---|
+| *(no args)* | render the main bar — what Claude Code calls |
+| `--subagent` | render agent-panel rows |
+| `install` / `uninstall` | wire both into `settings.json` |
+| `--doctor` / `--list` | diagnose an install / show every segment and switch |
 
 [`docs/how-it-works.md`](docs/how-it-works.md) is worth reading even if you write your own — §1–6 document the feature itself:
 every settings key, when it re-runs, what the failure modes are, the complete JSON payload with

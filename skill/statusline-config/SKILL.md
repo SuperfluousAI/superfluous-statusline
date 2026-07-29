@@ -110,5 +110,5 @@ work" is not an acceptable report — the render is the proof.
 
 ## Reference
 
-Full documentation of the status line — the payload, the layout algorithm, the pace maths — is in
-[`docs/how-it-works.md`](../../docs/how-it-works.md).
+Full documentation — the payload, the layout algorithm, the pace maths, and the other modes
+(`install`, `--doctor`, `--subagent`) — is in [`docs/how-it-works.md`](../../docs/how-it-works.md).

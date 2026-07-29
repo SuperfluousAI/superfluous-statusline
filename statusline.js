@@ -12,8 +12,8 @@
  *            missing field means "omit that segment," never "break the bar."
  *   width  = process.env.COLUMNS (exported by the harness; NOT tput — see §5)
  *
- * Point ~/.claude/settings.json at this file by absolute path, so the file you
- * edit IS the file that runs — no copy step, nothing to keep in sync.
+ * Point ~/.claude/settings.json at this file by absolute path (or run
+ * `node statusline.js install`), so the file you edit IS the file that runs.
  *
  * Every segment carries a LABEL. A bare value teaches nothing: "$34.02" and
  * "main" only read as cost and branch once you already know the layout.
@@ -127,7 +127,11 @@ const on = k => CFG.segments[k] !== false;
 // bright slots, so they still follow the colour scheme instead of hard-coding
 // RGB the way 38;5;N would. Nothing uses SGR 2 (dim); gray (90) is as quiet as
 // it gets — dim text was the main thing making the old bar hard to read.
-const E = (c, s) => `\x1b[${c}m${s}\x1b[0m`;
+// Empty content produces NO escapes at all. Wrapping '' yields a useless
+// `ESC[90m ESC[0m` pair that costs nothing visually but defeats end-of-line
+// whitespace trimming, which is exactly how a trailing space survived onto the
+// meters row.
+const E = (c, s) => (s === '' ? '' : `\x1b[${c}m${s}\x1b[0m`);
 const gray = s => E('90', s);
 const red = s => E('1;91', s);
 const green = s => E('1;92', s);
@@ -245,6 +249,307 @@ function meter(pct, width, tint, markPct) {
   return out;
 }
 
+// ── --subagent ───────────────────────────────────────────────────────────────
+/**
+ * The `subagentStatusLine` mode — a SEPARATE Claude Code setting that renders
+ * one row per subagent in the agent panel, replacing the default
+ * `name · description · token count`.
+ *
+ * Contract (docs §"Subagent status lines"), which differs from the main bar:
+ *   stdin  = ONE object with the base hook fields, a `columns` field giving the
+ *            usable row width, and a `tasks` array
+ *   stdout = ONE JSON LINE PER ROW: {"id": "<task id>", "content": "<row body>"}
+ *            Omit a task to keep its default row; emit "" to hide it.
+ *
+ * Note `columns` is handed to us here — no COLUMNS guessing, unlike the main
+ * bar. Each task carries: id, name, type, status, description, label,
+ * startTime, model, effort, contextWindowSize, tokenCount, tokenSamples, cwd.
+ *
+ * Wire it up alongside the main bar:
+ *   "subagentStatusLine": { "type": "command",
+ *                           "command": "node \"/path/to/statusline.js\" --subagent" }
+ */
+function subagentMode() {
+  let input = '';
+  const guard = setTimeout(() => process.exit(0), 3000);
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', c => (input += c));
+  process.stdin.on('end', () => {
+    clearTimeout(guard);
+    let d = {};
+    try { d = JSON.parse(input) || {}; } catch { process.exit(0); }
+
+    try {
+      const t = path.join(CACHE, 'statusline-subagent-last.json');
+      fs.writeFileSync(`${t}.${process.pid}.tmp`, input);
+      fs.renameSync(`${t}.${process.pid}.tmp`, t);
+    } catch { /* diagnostics only */ }
+
+    const W = Math.max(20, Math.min(500, d.columns || 80));
+    const out = [];
+    for (const task of (Array.isArray(d.tasks) ? d.tasks : [])) {
+      if (!task?.id) continue;                 // no id = nothing to address
+      try {
+        const content = subagentRow(task, W);
+        // Only override rows we actually improved; anything we can't render
+        // keeps Claude Code's default rather than becoming a blank row.
+        if (content) out.push(JSON.stringify({ id: task.id, content }));
+      } catch { /* this row keeps its default */ }
+    }
+    process.stdout.write(out.join('\n'));
+  });
+}
+
+/** Status glyph. Unknown states fall through to a neutral dot rather than vanishing. */
+function taskGlyph(status) {
+  const k = String(status || '').toLowerCase();
+  if (/run|active|progress|work/.test(k)) return cyan('▶');
+  if (/done|complet|success|finish/.test(k)) return green('✓');
+  if (/fail|error/.test(k)) return red('✗');
+  if (/cancel|abort|stop/.test(k)) return yellow('■');
+  if (/queue|pend|wait/.test(k)) return gray('◦');
+  return gray('·');
+}
+
+/**
+ * One agent row: glyph · name · context meter · elapsed · model/effort · what
+ * it's doing. Built from the widest form down, dropping the least useful piece
+ * until it fits the row width the harness gave us — the same
+ * measure-then-degrade approach as the main bar, because a row that overflows
+ * is worse than one that says less.
+ */
+function subagentRow(task, W) {
+  const name = task.label || task.name || task.type || 'agent';
+  const glyph = taskGlyph(task.status);
+
+  // Context used, when the model resolved (both fields need CC >= 2.1.205).
+  let meterStr = '', pctStr = '';
+  if (task.tokenCount > 0 && task.contextWindowSize > 0) {
+    const pct = Math.round((task.tokenCount / task.contextWindowSize) * 100);
+    const tint = pct >= 90 ? red : pct >= 75 ? yellow : pct >= 50 ? cyan : green;
+    meterStr = meter(pct, 10, tint);
+    pctStr = tint(`${pct}%`);
+  }
+
+  const elapsed = task.startTime ? dur(Date.now() - new Date(task.startTime).getTime()) : '';
+  const model = (task.model || '').replace(/^claude-/, '').replace(/-\d{8}$/, '');
+  const effort = task.effort ? String(task.effort) : '';
+  const desc = (task.description || '').replace(/\s+/g, ' ').trim();
+
+  // Widest → narrowest. First that fits wins.
+  const variants = [
+    () => [glyph, white(name), meterStr, pctStr, gray(elapsed), gray(model), gray(effort), gray(desc)],
+    () => [glyph, white(name), meterStr, pctStr, gray(elapsed), gray(model), gray(desc)],
+    () => [glyph, white(name), meterStr, pctStr, gray(elapsed), gray(desc)],
+    () => [glyph, white(name), meterStr, pctStr, gray(elapsed)],
+    () => [glyph, white(name), pctStr, gray(elapsed)],
+    () => [glyph, white(name)],
+  ];
+  for (const build of variants) {
+    let parts = build().filter(Boolean);
+    let line = parts.join(' ');
+    if (vlen(line) <= W) return tidy(line);
+    // Before dropping a whole field, try truncating the description — it is the
+    // only free-text field and the only one that can be arbitrarily long.
+    const di = parts.length - 1;
+    if (desc && vlen(parts[di]) > 12) {
+      const room = W - (vlen(line) - vlen(parts[di]));
+      if (room > 12) {
+        parts[di] = gray(desc.slice(0, room - 1) + '…');
+        line = parts.join(' ');
+        if (vlen(line) <= W) return tidy(line);
+      }
+    }
+  }
+  return '';   // nothing fits — keep Claude Code's default row
+}
+
+if (process.argv.includes('--subagent')) { subagentMode(); return; }
+
+// ── install / uninstall ──────────────────────────────────────────────────────
+/**
+ * `node statusline.js install` — wire this file into ~/.claude/settings.json.
+ *
+ * Written because the manual install is four steps (clone, find the absolute
+ * path, hand-edit JSON, hope) and three of them are places to get it wrong.
+ * It MERGES: every other setting is preserved, and the previous file is backed
+ * up first. It refuses to guess — if settings.json is unparseable it stops
+ * rather than overwriting something it can't read.
+ */
+function install(remove) {
+  const dir = path.join(HOME, '.claude');
+  const file = path.join(dir, 'settings.json');
+  const self = path.resolve(__filename);
+  const say = (icon, msg) => console.log(`  ${icon} ${msg}`);
+
+  let settings = {}, existed = false;
+  try {
+    const raw = fs.readFileSync(file, 'utf8');
+    existed = true;
+    try { settings = JSON.parse(raw); } catch (e) {
+      say(red('✗'), `${file} is not valid JSON — ${e.message}`);
+      say(gray(' '), 'Refusing to overwrite a file I cannot read. Fix the JSON and re-run.');
+      process.exit(1);
+    }
+  } catch { /* no settings file yet — we'll create one */ }
+
+  if (existed) {
+    // A timestamped backup, not a single .bak: running install twice should not
+    // destroy the pre-install original.
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backup = `${file}.bak-${stamp}`;
+    fs.copyFileSync(file, backup);
+    say(green('✓'), `backed up  ${gray(backup)}`);
+  }
+
+  const before = settings.statusLine?.command;
+  if (remove) {
+    if (!before && !settings.subagentStatusLine) {
+      say(gray('–'), 'nothing configured; nothing to remove'); return;
+    }
+    if (before) { delete settings.statusLine; say(green('✓'), `removed    ${gray(before)}`); }
+    if (settings.subagentStatusLine) {
+      const b2 = settings.subagentStatusLine.command;
+      delete settings.subagentStatusLine;
+      say(green('✓'), `removed    ${gray(b2)}`);
+    }
+  } else {
+    // Forward slashes even on Windows: the docs are explicit that backslashes
+    // in this string get eaten as escapes when Git Bash is installed.
+    const cmd = `node "${self.split(path.sep).join('/')}"`;
+    settings.statusLine = { type: 'command', command: cmd, refreshInterval: 30 };
+    if (before && before !== cmd) say(yellow('!'), `replacing  ${gray(before)}`);
+    say(green('✓'), `statusLine ${gray(cmd)}`);
+
+    // The agent-panel rows are a SEPARATE setting. Installing both is the whole
+    // point of a one-command install — nobody discovers subagentStatusLine on
+    // their own, and it costs nothing when no agents are running.
+    settings.subagentStatusLine = { type: 'command', command: `${cmd} --subagent` };
+    say(green('✓'), `subagent   ${gray(cmd + ' --subagent')}`);
+  }
+
+  try { fs.mkdirSync(dir, { recursive: true }); } catch { /* exists */ }
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(settings, null, 2) + '\n');
+  fs.renameSync(tmp, file);
+  say(green('✓'), `wrote      ${gray(file)}`);
+
+  if (!remove) {
+    // Prove it renders rather than asserting it will. A status line that fails
+    // shows a blank bar with no error anywhere, so "installed" is not a claim
+    // worth making without output to back it.
+    const demo = JSON.stringify({
+      workspace: { current_dir: process.cwd() },
+      model: { display_name: 'Opus 5' },
+      context_window: { remaining_percentage: 61 },
+      rate_limits: { five_hour: { used_percentage: 36 }, seven_day: { used_percentage: 68 } },
+    });
+    try {
+      const out = execFileSync(process.execPath, [self], {
+        input: demo, encoding: 'utf8', env: { ...process.env, COLUMNS: '120' },
+      });
+      console.log(`\n  preview\n${out.split('\n').map(l => '    ' + l).join('\n')}\n`);
+    } catch { say(yellow('!'), 'installed, but the preview render failed — run --doctor'); }
+    say(gray('→'), 'appears on the next update (a new message, /compact, or 30s)');
+  }
+}
+
+// ── --doctor ─────────────────────────────────────────────────────────────────
+/**
+ * Diagnose an install without guessing. Every check reports what it actually
+ * found, because the failure mode here is silence: a status line that exits
+ * non-zero, prints nothing, or was never wired up all look identical — a blank
+ * bar with no error anywhere.
+ */
+function doctor() {
+  let fail = 0, warn = 0;
+  const ok = m => console.log(`  ${green('ok  ')} ${m}`);
+  const no = m => { fail++; console.log(`  ${red('fail')} ${m}`); };
+  const hm = m => { warn++; console.log(`  ${yellow('warn')} ${m}`); };
+  const self = path.resolve(__filename);
+
+  console.log(`\n  ${white('superfluous-statusline')} — install check\n`);
+
+  ok(`node ${process.version} on ${process.platform}`);
+
+  // Is it actually wired up, and to THIS file?
+  const file = path.join(HOME, '.claude', 'settings.json');
+  let settings = null;
+  try { settings = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (e) {
+    if (fs.existsSync(file)) no(`settings.json is not valid JSON — ${e.message}`);
+    else no(`no settings.json at ${file} — run: node "${self}" install`);
+  }
+  if (settings) {
+    const cmd = settings.statusLine?.command;
+    if (!cmd) no(`settings.json has no statusLine — run: node "${self}" install`);
+    else if (!cmd.includes(path.basename(self))) {
+      hm(`statusLine points elsewhere: ${cmd}`);
+    } else {
+      const referenced = (cmd.match(/["']([^"']*statusline[^"']*)["']/i) || [])[1];
+      if (referenced && path.resolve(referenced) !== self) {
+        hm(`statusLine points at a DIFFERENT copy:\n         ${referenced}\n         (this file is ${self})`);
+      } else ok('settings.json → this file');
+    }
+    if (settings.statusLine && !settings.statusLine.refreshInterval) {
+      hm('no refreshInterval — reset countdowns will freeze while the session is idle');
+    }
+    if (settings.disableAllHooks === true) {
+      no('disableAllHooks is true — this disables the status line too');
+    }
+  }
+
+  // Width: the render records what it saw. A tput run here measures THIS shell.
+  const wf = path.join(CACHE, 'statusline-width');
+  try {
+    const w = fs.readFileSync(wf, 'utf8').trim();
+    ok(`last real render saw ${w}`);
+    if (w.includes('default')) hm('COLUMNS was not set — the bar falls back to 80 columns');
+  } catch { hm(`no width recorded yet at ${wf} — has it rendered once?`); }
+
+  // Payload cache doubles as the test fixture.
+  const pf = path.join(CACHE, 'statusline-last.json');
+  try {
+    const age = (Date.now() - fs.statSync(pf).mtimeMs) / 1000;
+    const d = JSON.parse(fs.readFileSync(pf, 'utf8'));
+    ok(`payload cache ${age < 120 ? 'fresh' : 'stale'} (${dur(age * 1000) || '0s'} old), Claude Code ${d.version || '?'}`);
+    if (!d.rate_limits) hm('no rate_limits in the last payload — plan meters need a Claude.ai Pro/Max account');
+  } catch { hm('no payload cached yet — the status line has not rendered since install'); }
+
+  // Config
+  const cf = process.env.STATUSLINE_CONFIG || path.join(HOME, '.claude', 'statusline.json');
+  if (fs.existsSync(cf)) {
+    try { JSON.parse(fs.readFileSync(cf, 'utf8')); ok(`config ${cf}`); }
+    catch (e) { no(`config is not valid JSON, so it is being IGNORED — ${cf}\n         ${e.message}`); }
+  } else ok('config: defaults (no statusline.json)');
+
+  // Can we cache at all?
+  try {
+    const t = path.join(CACHE, `.probe-${process.pid}`);
+    fs.writeFileSync(t, 'x'); fs.unlinkSync(t);
+    ok(`cache writable ${gray(CACHE)}`);
+  } catch { hm(`cache not writable (${CACHE}) — slower, still works`); }
+
+  // git
+  try {
+    const v = execFileSync('git', ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    ok(v.toLowerCase());
+  } catch (e) {
+    // Distinguish "absent" from "present but broken" — on this machine git is a
+    // wrapper script under $HOME, which fails when HOME is unusual. Reporting
+    // that as "not found on PATH" sent me looking in the wrong place once.
+    const why = /ENOENT/.test(e.message) ? 'not found on PATH' : `failed to run: ${e.message.split('\n')[0]}`;
+    hm(`git ${why} — the dirty marker will be missing (branch still works)`);
+  }
+
+  console.log(`\n  ${fail ? red(fail + ' failure(s)') : green('no failures')}${warn ? gray(', ') + yellow(warn + ' warning(s)') : ''}\n`);
+  process.exit(fail ? 1 : 0);
+}
+
+if (process.argv[2] === 'install') { install(false); process.exit(0); }
+if (process.argv[2] === 'uninstall') { install(true); process.exit(0); }
+if (process.argv.includes('--doctor')) { doctor(); }
+
 // ── --list / --help ──────────────────────────────────────────────────────────
 /**
  * Printed on demand, never during a render. Exists so the available knobs are
@@ -341,8 +646,14 @@ const pad = (s, n) => s + ' '.repeat(Math.max(0, n - vlen(s)));
  * rather than ending the string. Strip both, repeatedly, until stable.
  */
 function tidy(line) {
+  // Trailing spaces can be followed by ANY NUMBER of escape sequences, not one:
+  // `68% ESC[0m ESC[90m ESC[0m` is what an empty tail used to produce. Match the
+  // whole trailing escape run, not a single optional reset.
   let prev;
-  do { prev = line; line = line.replace(/ +(\x1b\[0m)?$/, '$1'); } while (line !== prev);
+  do {
+    prev = line;
+    line = line.replace(/ +((?:\x1b\[[0-9;]*m)*)$/, '$1');
+  } while (line !== prev);
   return line;
 }
 

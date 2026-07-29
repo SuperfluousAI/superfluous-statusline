@@ -7,8 +7,8 @@
 > measured on a real machine · **⚙️ OURS** — a decision this project made.
 >
 > Primary source: **<https://code.claude.com/docs/en/statusline>** (read 2026-07-28; note
-> `docs.claude.com/en/docs/claude-code/statusline` 301s to it). Observations were made against Claude
-> Code **2.1.220** on Linux.
+> `docs.claude.com/en/docs/claude-code/statusline` 301s to it). Observed against Claude Code **2.1.220**
+> on Linux.
 
 ---
 
@@ -34,7 +34,7 @@ your session and printing back whatever it says.
 ```json
 "statusLine": {
   "type": "command",
-  "command": "node \"/absolute/path/to/superfluous-statusline/statusline.js\"",
+  "command": "node \"/path/to/superfluous-statusline/statusline.js\"",
   "refreshInterval": 30
 }
 ```
@@ -56,8 +56,8 @@ Related keys elsewhere in settings:
 - 📘 **`footerLinksRegexes`** — if all you want is clickable badges when an ID appears in conversation,
   use this instead of writing a script.
 
-⚙️ Point it at an **absolute path** to wherever you cloned this repo, so the file you edit is the file
-that runs. The cost: move or delete the clone and the status line silently stops rendering.
+⚙️ Ours points at an **absolute path into this repo**, so the file you edit is the file that runs — no
+copy step, no drift. See the project docs for why, and its cost.
 
 ---
 
@@ -278,7 +278,7 @@ Three logical groups, **packed greedily into as few lines as fit**:
 Groups merge from the top while the joined string fits in `W - 1`, so a wide terminal collapses to one or
 two lines and a narrow one gets three. Merging is decided by **measuring**, never by a width threshold, so
 it can't drift out of step with the content. Observed: 2 lines at ≥214 columns, 3 below ~180.
-- ⚙️ Segments are separated by a literal **`|`**, and **every segment is labelled**.
+- ⚙️ Segments are separated by a literal **`|`** (operator's choice) and **every segment is labelled**.
   A bare value teaches nothing — `$14.42` and `main` only read as cost and branch if you already know the
   layout by heart.
 
@@ -320,8 +320,7 @@ its local part** (`you`) — that still answers "which account is this?", which 
 > ⚙️ **The email is not in the payload.** No field carries the signed-in account, so it is read from
 > `~/.claude.json` (`oauthAccount.emailAddress`) — cached 6h, regex-matched rather than `JSON.parse`d,
 > because that file is ~130 KB and this runs on every render. Note this is the **Claude account**, which
-> is not the same as `git config user.email` — often different accounts, and the one worth showing is
-> the one whose rate limits the bar displays.
+> is not the same as `git config user.email` (`you@git.example.com` here).
 
 ### Meters
 
@@ -336,7 +335,7 @@ colour, track stays gray — the boundary is the point of a bar over a number.
 | 7-day | `weekly` | `rate_limits.seven_day` | same |
 
 Labels are **words, not codes** — `5h`/`7d` said nothing about what they measured. Reset countdowns are
-**spelled out** (`resets in 12m`); they were briefly a `↻` glyph nobody could read, and a symbol
+**spelled out** (`resets in 12m`); they were briefly a `↻` glyph the operator couldn't read, and a symbol
 that needs explaining is not a label. Percentages are padded to a fixed column so the `|` separators don't
 jump as digits are gained and lost.
 
@@ -417,7 +416,7 @@ shouldn't require a second one.
 `cost elapsed effort cache diff` (economics) · `ctx session weekly` (meters).
 
 **`node statusline.js --list`** prints every segment and switch with its current value and the config
-source. It is the authoritative list: the `statusline-config` skill reads it rather than carrying its own
+source. It is the authoritative list: the `/statusline-config` skill reads it rather than carrying its own
 copy, so the two can't drift.
 
 Behaviour worth knowing:
@@ -480,6 +479,80 @@ Windows.
 
 ---
 
+## 8d. The other three modes
+
+The script is one file with four entry points. Everything below `--subagent` is a mode, not a segment.
+
+### `install` / `uninstall`
+
+```bash
+node statusline.js install       # wires BOTH bars into ~/.claude/settings.json
+node statusline.js uninstall     # removes both
+```
+
+Merges rather than overwrites, backs up to a **timestamped** `settings.json.bak-<iso>` (so running it
+twice doesn't destroy the pre-install original), and **refuses to proceed if `settings.json` is
+unparseable** — overwriting a file you can't read is how someone loses their whole configuration. Then it
+renders a preview, because "installed" isn't a claim worth making without output behind it.
+
+It installs `subagentStatusLine` too. Nobody discovers that setting on their own, and it costs nothing
+when no agents are running.
+
+### `--doctor`
+
+Diagnoses an install. Every failure mode here is silent — a script that exits non-zero, prints nothing, or
+was never wired up all look identical: a blank bar, no error. So the check reports what it actually found:
+
+- is `settings.json` valid, and does `statusLine` point at **this** file (not another copy)?
+- is `refreshInterval` set — otherwise countdowns freeze while idle
+- is `disableAllHooks` on, which silently disables the status line too
+- what width did the **last real render** see (from `~/.cache/statusline-width` — not a `tput` here, which
+  would measure the wrong pty)
+- is the payload cache fresh, and did it contain `rate_limits`
+- does the config file parse — an unparseable one is *ignored*, so settings appear not to apply
+- is the cache writable; is `git` runnable
+
+Exits non-zero on failure so it can be used as a check.
+
+> One diagnostic was wrong before it was right: `git` on this machine is a wrapper script under `$HOME`,
+> so it *executes* fine normally but fails when `HOME` is unusual. Reporting that as "not found on PATH"
+> sent me looking in the wrong place. It now distinguishes ENOENT from a run failure and prints the error.
+
+### `--subagent`
+
+📘 A **separate Claude Code setting**, `subagentStatusLine`, rendering one row per subagent in the agent
+panel — replacing the default `name · description · token count`.
+
+The contract differs from the main bar:
+
+| | main bar | subagent bar |
+|---|---|---|
+| stdin | one session object | one object with `columns` **and a `tasks` array** |
+| width | must be discovered from `COLUMNS` | **handed to you** as `columns` |
+| stdout | the bar text | **one JSON line per row**: `{"id": …, "content": …}` |
+| opting out | n/a | omit a task → default row; `content: ""` → hide it |
+
+Per task: `id`, `name`, `type`, `status`, `description`, `label`, `startTime`, `model`, `effort`,
+`contextWindowSize`, `tokenCount`, `tokenSamples`, `cwd`. 📘 `model`/`contextWindowSize` need CC ≥ 2.1.205
+and are absent until the model resolves; `effort` needs ≥ 2.1.214 and is absent when the subagent inherits
+the session's effort.
+
+Our row: status glyph · name · context meter from `tokenCount / contextWindowSize` · elapsed · model ·
+effort · description.
+
+```
+▶ review:auth █▊░░░░░░░░ 18% 40m opus-5 high Reviewing the session token refresh path for race conditions
+✓ find:callsites █████████░ 91% 25m sonnet-5 Locate every caller of resolveCwd across the repo
+◦ security-auditor 10m Waiting on t1
+✗ flaky █████████▊ 98% 8m haiku-4-5 Broke
+```
+
+Same measure-then-degrade approach as the main bar: six variants widest-to-narrowest, and the description
+(the only arbitrarily-long field) is **truncated before any field is dropped**. A row we can't render at
+all returns `''`, which keeps Claude Code's default rather than blanking it. Verified 25–200 columns.
+
+---
+
 ## 9. Testing it
 
 ⚙️ The file in this repo **is** the file that runs, so edit and the next render shows it.
@@ -514,8 +587,7 @@ Every render writes its raw stdin to `~/.cache/statusline-last.json`. After a Cl
 ```bash
 python3 -c "
 import json
-import os
-d=json.load(open(os.path.expanduser('~/.cache/statusline-last.json')))
+d=json.load(open('~/.cache/statusline-last.json'))
 def walk(o,p=''):
     if isinstance(o,dict):
         for k,v in o.items(): walk(v,f'{p}.{k}' if p else k)
@@ -564,24 +636,23 @@ Remaining known trade-offs, stated rather than hidden:
 
 ## 12. History — and the mistakes worth keeping
 
-Built over a couple of sessions; several turns were wrong before they were right. Recorded because each is
-a trap the next person can fall into.
+Recorded because each is a trap the next person can fall into.
 
 - **Built against 4 guessed fields**, then rebuilt against the full payload once a live render was
-  captured. **This is why the script caches every payload** — the contract stays verified from fact
-  instead of decaying into recollection.
-- **The payload cache was written non-atomically**, and a live render truncated it mid-read. Now
-  write-then-rename.
-- **"The terminal is 80 columns" — wrong.** That came from `tput cols` in a *different shell*, which
-  measures that shell's pty. The real terminal was 214. Where you measure is part of the measurement.
-- **`tput cols` inside the script appeared to work** and returned the right answer. Luck: ncurses reads
-  `$COLUMNS` itself — the variable the docs tell you to read directly. **"It works" is not "it's correct."**
-- **A minimum bar width made things worse** — clamping to ≥6 cells didn't rescue a narrow terminal, it
-  overflowed instead. Degrade *content*, never legibility.
+  captured. **This is why the script caches every payload** — the contract stays verified from fact.
+- **The payload cache was written non-atomically**, and a live render truncated it mid-read.
+- **"The terminal is 80 columns" — wrong.** `tput cols` in a *different shell* measures that shell's pty.
+  The real terminal was 214. Where you measure is part of the measurement.
+- **`tput cols` inside the script appeared to work.** Luck: ncurses reads `$COLUMNS` itself — the variable
+  the docs tell you to read directly. **"It works" is not "it's correct."**
+- **A minimum bar width made things worse** — clamping to ≥6 cells overflowed instead of rescuing.
+  Degrade *content*, never legibility.
 - **Renaming a label broke the layout**, because the width budget had the old label's length baked in.
-  Sum budgets from the actual strings.
 - **`awk`/`wc -c` count bytes, and `█` is three of them.** Byte-counting called a 76-column line 158, then
-  called a real overflow fine. Measure display width character-aware, after stripping ANSI.
-- **`~/.cache` was assumed to exist.** True on Linux by convention, false on Windows and a fresh macOS —
-  so every cache write failed silently and a 130 KB file was re-read on every render, with the bar still
-  looking perfectly correct. Silent, invisible, and only found by auditing for platform assumptions.
+  called a real overflow fine.
+- **`~/.cache` was assumed to exist** — true on Linux, false on Windows and fresh macOS. Every cache write
+  failed silently and a 130 KB file was re-read on every render, with the bar still looking correct.
+- **Trailing whitespace survived** because the trimmer expected one ANSI reset and empty content emitted
+  two. Fixed by not emitting escapes for empty content at all.
+- **"git not found on PATH" was the wrong diagnosis** — git was a wrapper script under `$HOME` that failed
+  only when `HOME` was unusual. Distinguish "absent" from "present but broken."
