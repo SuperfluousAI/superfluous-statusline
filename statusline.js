@@ -847,7 +847,14 @@ function render(d, W) {
     const { capIn } = CFG.projection ? pace(v, windowMs) : {};
     if (capIn) return { text: ` cap in ~${capIn}`, tint: yellow };
     const r = v.resets_at ? until(v.resets_at) : '';
-    return r ? { text: ` resets in ${r}`, tint: gray } : { text: '', tint: gray };
+    if (r) return { text: ` resets in ${r}`, tint: gray };
+    // resets_at exists but is ALREADY PAST: the window rolled over and the
+    // harness hasn't refreshed the field yet. Silently dropping the countdown
+    // here reads as "the feature disappeared" — it happened, and it was
+    // confusing. Say what's actually true instead: the reset is due and this
+    // percentage may be a moment behind.
+    if (v.resets_at) return { text: ' reset due', tint: yellow };
+    return { text: '', tint: gray };
   };
 
   const buildMeters = ({ short, showTail, showPace }) => {

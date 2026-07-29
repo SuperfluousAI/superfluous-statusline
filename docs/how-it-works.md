@@ -369,6 +369,19 @@ window resets: `cap in ~22h35m` instead of `resets in 2d`. "Resets in 2d" is col
 Guards: no pace or projection within the first minute of a window (the rate is pure noise), if `resets_at`
 is missing or past, or if the time remaining exceeds the window length (a window we can't reason about).
 
+**The four states a window tail can be in**, all visually distinct:
+
+| Tail | Meaning |
+|---|---|
+| `resets in 1h` | normal — counting down to the reset |
+| `cap in ~26m` | burning fast enough to hit 100% *before* the reset |
+| `reset due` | 🔬 **`resets_at` is in the PAST.** The window rolled over and the harness hasn't refreshed the field yet, so the percentage beside it may be a moment behind. Observed on the 5-hour window with a timestamp 1.9h stale. |
+| *(nothing)* | no `resets_at` field at all — the only case where we genuinely have nothing to say |
+
+The `reset due` state exists because the silent version was actively misleading: the countdown simply
+vanished and read as a feature being removed. A missing number that *should* be there deserves an
+explanation, not a gap.
+
 ### The fallback ladder
 
 Below ~100 columns the words + reset phrases + three bars cannot fit, and clamping the bar to a minimum
@@ -703,4 +716,8 @@ Remaining known trade-offs, stated rather than hidden:
   assumption, and paid for it with a class of bug. `JSON.parse` addresses the field by name with the regex
   as a fallback for a partial read during `/login`; reading fresh means a transient failure self-heals,
   which no cache could do.
-
+- **2026-07-29** — **a stale `resets_at` now says `reset due` instead of showing nothing.** The 5-hour
+  window's timestamp went 1.9h into the past (the window rolled; the harness had not refreshed the field),
+  `until()` correctly refused to count down to a moment already gone, and the countdown silently
+  disappeared — which read as the feature having been removed. Correct behaviour, terrible communication.
+  The four tail states (counting down · cap projected · reset due · no field) are now visually distinct.

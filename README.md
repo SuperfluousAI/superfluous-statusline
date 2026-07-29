@@ -26,6 +26,15 @@ under-using      weekly ███▎░░░░░░░░░░░░░░�
 
 68% is fine on day six and alarming on day two. The tick is what tells you which one you're in.
 
+A window's trailing text has four states, so a missing countdown always explains itself:
+
+| | |
+|---|---|
+| `resets in 1h` | counting down normally |
+| `cap in ~26m` | you'd hit the cap *before* the window resets |
+| `reset due` | Claude Code's reset timestamp is already in the past — the window rolled and the field hasn't refreshed, so the percentage may lag |
+| *(nothing)* | no reset timestamp sent at all |
+
 ## Why you might want this one
 
 - **Real meters, not numbers.** Eighth-block bars (`▏▎▍▌▋▊▉`) so they move smoothly, colour-coded by
