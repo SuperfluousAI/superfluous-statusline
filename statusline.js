@@ -71,7 +71,7 @@ const SEGMENTS = [
   ['effort', 'economics', 'reasoning effort level'],
   ['cache', 'economics', 'share of context input served from cache'],
   ['diff', 'economics', 'lines added/removed this session'],
-  ['ctx', 'meters', 'context window remaining'],
+  ['ctx', 'meters', 'context window used'],
   ['session', 'meters', '5-hour plan window'],
   ['weekly', 'meters', '7-day plan window'],
 ];
@@ -483,7 +483,7 @@ function install(remove) {
     const demo = JSON.stringify({
       workspace: { current_dir: process.cwd() },
       model: { display_name: 'Opus 5' },
-      context_window: { remaining_percentage: 61 },
+      context_window: { used_percentage: 39 },
       rate_limits: { five_hour: { used_percentage: 36 }, seven_day: { used_percentage: 68 } },
     });
     try {
@@ -798,7 +798,18 @@ function render(d, W) {
   // that: it just overflows instead (it did, at 80). So try progressively
   // cheaper variants and take the first that FITS, measured on the rendered
   // string rather than predicted. Degrading content beats degrading legibility.
-  const hasCtx = on('ctx') && typeof d.context_window?.remaining_percentage === 'number';
+  // USED, not remaining. Every other meter on this bar fills up as you consume
+  // the thing it measures; a ctx bar that EMPTIED as you filled the context
+  // made the same visual mean opposite things side by side. Prefer the
+  // harness's own used_percentage; fall back to inverting remaining only if
+  // that's all we're given.
+  const ctxUsed = (() => {
+    const c = d.context_window;
+    if (typeof c?.used_percentage === 'number') return c.used_percentage;
+    if (typeof c?.remaining_percentage === 'number') return 100 - c.remaining_percentage;
+    return null;
+  })();
+  const hasCtx = on('ctx') && ctxUsed !== null;
   const H = 3600_000, D = 24 * H;
   const raw = [
     ['active session', '5h', d.rate_limits?.five_hour, 5 * H, 'session'],
@@ -830,8 +841,10 @@ function render(d, W) {
 
     const outSeg = [];
     if (hasCtx) {
-      const pct = Math.round(d.context_window.remaining_percentage);
-      const tint = pct <= 10 ? red : pct <= 25 ? yellow : green;
+      const pct = Math.round(ctxUsed);
+      // Same thresholds as the plan windows, deliberately: three meters that
+      // look alike should be read the same way.
+      const tint = pct >= 90 ? red : pct >= 75 ? yellow : pct >= 50 ? cyan : green;
       outSeg.push(gray('ctx ') + meter(pct, bw, tint) + ' ' + tint(pad(`${pct}%`, 4)));
     }
     for (const w of raw) {

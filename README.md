@@ -253,7 +253,7 @@ fixture for testing changes.
 
 | Meter | Shows |
 |---|---|
-| `ctx` | context window **remaining**. Green >25%, yellow ≤25%, red ≤10% |
+| `ctx` | context window **used**. Fills up as you spend it — same direction and the same colour scale as the two plan meters, so all three read identically |
 | `active session` | your 5-hour plan window |
 | `weekly` | your 7-day plan window |
 

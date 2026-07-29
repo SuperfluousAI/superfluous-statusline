@@ -1,7 +1,7 @@
 {
   "name": "superfluous-statusline",
-  "version": "1.1.0",
-  "description": "A status line for Claude Code — context and plan rate-limit meters with pace ticks, labelled segments, width-adaptive. One file, zero dependencies.",
+  "version": "1.2.0",
+  "description": "A status line for Claude Code \u2014 context and plan rate-limit meters with pace ticks, labelled segments, width-adaptive. One file, zero dependencies.",
   "keywords": [
     "claude",
     "claude-code",
