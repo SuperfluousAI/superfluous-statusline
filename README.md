@@ -377,10 +377,11 @@ correctly omit themselves.
 **No `ctx` bar at the start.** Context fields are `null` until the first API response, and again right
 after `/compact`.
 
-**The email is wrong or missing.** It's read from `~/.claude.json` (`oauthAccount.emailAddress`) — your
-**Claude** account, not `git config user.email`, which is often a different address. It's read **fresh on
-every render and never cached**, so `/login` and account switching show up immediately with nothing to
-clear. `--doctor` prints the account it resolved and when that file last changed.
+**The email is wrong or missing.** It's your **Claude** account, not `git config user.email`. It comes from the
+token's own OAuth profile (`api.anthropic.com/api/oauth/profile`), looked up once per login: the cached answer is
+dropped whenever `.credentials.json` changes, so `/login` shows up on the next render. That matters because `/login`
+has been seen to leave `~/.claude.json`'s `oauthAccount.emailAddress` on the old account. Offline, or with an API-key
+login, it falls back to reading `~/.claude.json` fresh. `CLAUDE_CONFIG_DIR` is honoured.
 
 **The dirty `*` is stale.** The `git status` behind it is cached for 4 seconds, deliberately, to keep the
 script off the hot path. That cache leaves one small file per repo in `~/.cache/` — a byte each, safe to

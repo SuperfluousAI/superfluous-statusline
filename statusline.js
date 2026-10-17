@@ -1148,11 +1148,35 @@ function diffSeg(d) {
  * latch the bad value.
  */
 function userSeg() {
-  const src = path.join(HOME, '.claude.json');
-  let raw;
-  try { raw = fs.readFileSync(src, 'utf8'); } catch { return ''; }
+  // `/login` swaps the token in .credentials.json but has been seen to leave
+  // ~/.claude.json's emailAddress on the OLD account (2026-10-17). So the live
+  // answer comes from the token's own OAuth profile, cached until the
+  // credentials file changes (one HTTPS call per login); ~/.claude.json, read
+  // fresh, is the fallback. Honours CLAUDE_CONFIG_DIR.
+  const cfg = process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
+  const creds = path.join(cfg, '.credentials.json');
+  const cacheFile = path.join(CACHE, 'statusline-identity');
   let email = '';
-  try { email = JSON.parse(raw)?.oauthAccount?.emailAddress || ''; }
-  catch { email = (raw.match(/"emailAddress"\s*:\s*"([^"]+)"/) || [])[1] || ''; }
+  try {
+    const cm = fs.statSync(creds).mtimeMs;
+    let hit = false;
+    try { hit = fs.statSync(cacheFile).mtimeMs >= cm; } catch { /* cold */ }
+    if (hit) email = fs.readFileSync(cacheFile, 'utf8').trim();
+    else {
+      const tok = JSON.parse(fs.readFileSync(creds, 'utf8')).claudeAiOauth.accessToken;
+      const out = execFileSync('curl', ['-s', '-m', '2', '-H', `Authorization: Bearer ${tok}`,
+        '-H', 'anthropic-beta: oauth-2025-04-20', 'https://api.anthropic.com/api/oauth/profile'],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 });
+      email = JSON.parse(out).account?.email_address || '';
+      if (email) { try { fs.writeFileSync(cacheFile, email); } catch { /* optional */ } }
+    }
+  } catch { /* no creds, offline, API-key login: fall back */ }
+  if (!email) {
+    const src = process.env.CLAUDE_CONFIG_DIR ? path.join(cfg, '.claude.json') : path.join(HOME, '.claude.json');
+    let raw;
+    try { raw = fs.readFileSync(src, 'utf8'); } catch { return ''; }
+    try { email = JSON.parse(raw)?.oauthAccount?.emailAddress || ''; }
+    catch { email = (raw.match(/"emailAddress"\s*:\s*"([^"]+)"/) || [])[1] || ''; }
+  }
   return email ? seg('user', white(email)) : '';
 }
